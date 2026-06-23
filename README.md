@@ -1,12 +1,36 @@
-# MLB Moneyline Command Center v3
+# MLB Moneyline Parlay Command Center v5
 
-This version improves the visual layout to be closer to the mockup:
+This version fixes two issues from v4:
 
-- Collapsed Streamlit sidebar by default
-- Controls moved into an in-page Dashboard Controls panel
-- Dense command-center layout with left rail, main ticket, boosters, traps, best available legs, and game breakdown
-- Always shows best available / near-miss candidates when no full ticket qualifies
+1. **Visual layout**: the main Command Center is now rendered as a custom HTML/CSS dashboard inside Streamlit, so it looks much closer to the original dark mockup instead of normal Streamlit cards and white tables.
+2. **Odds matching**: team matching is normalized, and the app retries The Odds API without a bookmaker filter if the selected books return zero odds. This should fix the issue where every team showed `Odds: None`.
+
+## Files
+
+- `app.py` — Streamlit app
+- `requirements.txt` — Python dependencies
+- `park_data.csv` — stadium coordinates/park factors
+- `results_tracker.csv` — results tracker template
 
 ## Deploy update
 
-Replace the existing files in your GitHub repo with these files, especially `app.py`. Commit changes, then reboot/rerun your Streamlit app. Your `ODDS_API_KEY` secret stays in Streamlit Cloud and does not need to be re-entered.
+Upload these files into the same GitHub repo location as your current `app.py` and commit changes. Then reboot the Streamlit app.
+
+You do not need to redo your Streamlit secrets. Keep:
+
+```toml
+ODDS_API_KEY = "your_key_here"
+```
+
+## First thing to check after deploy
+
+Open the app and expand **Advanced views → API Diagnostics** only if the dashboard still has no odds.
+
+Look for:
+
+- `odds_events`
+- `odds_outcomes`
+- `matched_games`
+
+If `odds_outcomes` is 0, The Odds API is not returning odds for your API key/date/region.
+If `odds_outcomes` is positive but `matched_games` is 0, team matching is the issue.
