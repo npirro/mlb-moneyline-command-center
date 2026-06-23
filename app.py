@@ -1,0 +1,743 @@
+import os
+import math
+import json
+from datetime import datetime, timedelta, date
+from typing import Dict, List, Any, Tuple, Optional
+
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
+import pytz
+
+st.set_page_config(page_title="MLB Moneyline Command Center", page_icon="⚾", layout="wide")
+
+EASTERN = pytz.timezone("America/New_York")
+ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
+MLB_SCHEDULE = "https://statsapi.mlb.com/api/v1/schedule"
+MLB_TEAM_STATS = "https://statsapi.mlb.com/api/v1/teams/{team_id}/stats"
+MLB_PLAYER_STATS = "https://statsapi.mlb.com/api/v1/people/{person_id}/stats"
+OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
+
+TEAM_ALIASES = {
+    "Arizona Diamondbacks": "ARI", "Atlanta Braves": "ATL", "Baltimore Orioles": "BAL", "Boston Red Sox": "BOS",
+    "Chicago Cubs": "CHC", "Chicago White Sox": "CHW", "Cincinnati Reds": "CIN", "Cleveland Guardians": "CLE",
+    "Colorado Rockies": "COL", "Detroit Tigers": "DET", "Houston Astros": "HOU", "Kansas City Royals": "KC",
+    "Los Angeles Angels": "LAA", "Los Angeles Dodgers": "LAD", "Miami Marlins": "MIA", "Milwaukee Brewers": "MIL",
+    "Minnesota Twins": "MIN", "New York Mets": "NYM", "New York Yankees": "NYY", "Oakland Athletics": "ATH",
+    "Athletics": "ATH", "Philadelphia Phillies": "PHI", "Pittsburgh Pirates": "PIT", "San Diego Padres": "SD",
+    "San Francisco Giants": "SF", "Seattle Mariners": "SEA", "St. Louis Cardinals": "STL", "Tampa Bay Rays": "TB",
+    "Texas Rangers": "TEX", "Toronto Blue Jays": "TOR", "Washington Nationals": "WSH",
+}
+
+# Dark dashboard styling inspired by the mockup.
+st.markdown("""
+<style>
+:root { --bg:#07131f; --panel:#0e2130; --panel2:#102636; --text:#f5f7fb; --muted:#a9bac8; --green:#31e56b; --red:#ff4545; --yellow:#ffc928; --blue:#2e8cff; }
+.stApp { background: radial-gradient(circle at top left, #0b2537 0%, #06101b 42%, #030912 100%); color: var(--text); }
+.block-container { padding-top: 1rem; padding-bottom: 2rem; max-width: 1600px; }
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #0a1824 0%, #07111d 100%); border-right: 1px solid #20374a; }
+.metric-card, .panel { background: linear-gradient(180deg, rgba(17,38,54,.96), rgba(10,24,36,.96)); border: 1px solid #263d50; border-radius: 12px; padding: 16px; box-shadow: 0 10px 24px rgba(0,0,0,.22); }
+.metric-title { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; }
+.metric-value { color: var(--text); font-size: 2rem; font-weight: 800; margin-top: .2rem; }
+.green { color: var(--green); } .red { color: var(--red); } .yellow { color: var(--yellow); } .blue { color: var(--blue); }
+.badge { display:inline-block; border-radius: 999px; padding: 4px 10px; font-size: .78rem; font-weight: 800; border: 1px solid rgba(255,255,255,.12); }
+.badge-a { background: rgba(49,229,107,.12); color: var(--green); }
+.badge-b { background: rgba(255,201,40,.12); color: var(--yellow); }
+.badge-no { background: rgba(255,69,69,.12); color: var(--red); }
+.badge-lean { background: rgba(46,140,255,.12); color: var(--blue); }
+.section-title { color: var(--green); text-transform: uppercase; font-weight: 900; letter-spacing: .05em; margin: 0 0 10px 0; }
+.small-note { color: var(--muted); font-size: .88rem; }
+hr { border-color: #20374a !important; }
+[data-testid="stMetricValue"] { color: #f6fbff; }
+.stDataFrame { border: 1px solid #263d50; border-radius: 12px; overflow: hidden; }
+button[kind="primary"] { background: #0d6fd6 !important; border: 1px solid #419cff !important; }
+</style>
+""", unsafe_allow_html=True)
+
+
+def safe_get_json(url: str, params: Dict[str, Any], timeout: int = 20) -> Optional[dict]:
+    try:
+        r = requests.get(url, params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        st.session_state.setdefault("errors", []).append(f"API error: {url} — {e}")
+        return None
+
+
+def american_to_implied(odds: float) -> float:
+    if odds is None or (isinstance(odds, float) and math.isnan(odds)):
+        return np.nan
+    odds = float(odds)
+    if odds < 0:
+        return abs(odds) / (abs(odds) + 100)
+    return 100 / (odds + 100)
+
+
+def american_to_decimal(odds: float) -> float:
+    odds = float(odds)
+    if odds < 0:
+        return 1 + 100 / abs(odds)
+    return 1 + odds / 100
+
+
+def decimal_to_american(decimal_odds: float) -> int:
+    if decimal_odds >= 2:
+        return int(round((decimal_odds - 1) * 100))
+    return int(round(-100 / (decimal_odds - 1)))
+
+
+def parlay_american(odds_list: List[float]) -> Optional[int]:
+    odds_list = [o for o in odds_list if pd.notna(o)]
+    if not odds_list:
+        return None
+    dec = np.prod([american_to_decimal(o) for o in odds_list])
+    return decimal_to_american(dec)
+
+
+def norm_pct(val, default=0.5):
+    try:
+        if val is None: return default
+        v = float(val)
+        if v > 1: v = v / 100
+        return max(0, min(1, v))
+    except Exception:
+        return default
+
+
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+@st.cache_data(ttl=3600)
+def load_park_data():
+    try:
+        return pd.read_csv("park_data.csv")
+    except Exception:
+        return pd.DataFrame(columns=["venue", "city", "lat", "lon", "park_factor"])
+
+
+@st.cache_data(ttl=300)
+def fetch_odds(api_key: str, regions: str, bookmakers: str) -> List[dict]:
+    params = {
+        "apiKey": api_key,
+        "regions": regions,
+        "markets": "h2h",
+        "oddsFormat": "american",
+        "dateFormat": "iso",
+    }
+    if bookmakers.strip():
+        params["bookmakers"] = bookmakers.strip()
+    data = safe_get_json(ODDS_API_BASE, params=params)
+    return data if isinstance(data, list) else []
+
+
+@st.cache_data(ttl=300)
+def fetch_schedule(day: date) -> List[dict]:
+    params = {
+        "sportId": 1,
+        "date": day.strftime("%Y-%m-%d"),
+        "hydrate": "probablePitcher,team,venue",
+    }
+    data = safe_get_json(MLB_SCHEDULE, params=params)
+    games = []
+    if not data:
+        return games
+    for d in data.get("dates", []):
+        games.extend(d.get("games", []))
+    return games
+
+
+@st.cache_data(ttl=1800)
+def fetch_team_stats(team_id: int, group: str = "hitting", lookback_days: int = 14) -> Dict[str, Any]:
+    # Uses season stats plus recent date range when the endpoint supports it. Falls back gracefully.
+    out = {"season": {}, "recent": {}}
+    season = safe_get_json(MLB_TEAM_STATS.format(team_id=team_id), {"stats": "season", "group": group})
+    if season:
+        try:
+            out["season"] = season["stats"][0]["splits"][0].get("stat", {})
+        except Exception:
+            pass
+    end = datetime.now(EASTERN).date()
+    start = end - timedelta(days=lookback_days)
+    recent = safe_get_json(MLB_TEAM_STATS.format(team_id=team_id), {
+        "stats": "byDateRange", "group": group,
+        "startDate": start.strftime("%m/%d/%Y"), "endDate": end.strftime("%m/%d/%Y")
+    })
+    if recent:
+        try:
+            out["recent"] = recent["stats"][0]["splits"][0].get("stat", {})
+        except Exception:
+            pass
+    return out
+
+
+@st.cache_data(ttl=1800)
+def fetch_pitcher_stats(person_id: int) -> Dict[str, Any]:
+    data = safe_get_json(MLB_PLAYER_STATS.format(person_id=person_id), {"stats": "season", "group": "pitching"})
+    if not data:
+        return {}
+    try:
+        return data["stats"][0]["splits"][0].get("stat", {})
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=900)
+def fetch_weather(lat: float, lon: float, game_time_iso: str) -> Dict[str, Any]:
+    try:
+        game_dt = pd.to_datetime(game_time_iso, utc=True).tz_convert(EASTERN)
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,precipitation_probability",
+            "temperature_unit": "fahrenheit",
+            "wind_speed_unit": "mph",
+            "timezone": "America/New_York",
+            "forecast_days": 3,
+        }
+        data = safe_get_json(OPEN_METEO, params=params, timeout=15)
+        if not data or "hourly" not in data:
+            return {}
+        df = pd.DataFrame(data["hourly"])
+        df["time"] = pd.to_datetime(df["time"])
+        target = pd.Timestamp(game_dt.replace(minute=0, second=0, microsecond=0).replace(tzinfo=None))
+        if df.empty:
+            return {}
+        df["diff"] = (df["time"] - target).abs()
+        row = df.sort_values("diff").iloc[0].to_dict()
+        return row
+    except Exception:
+        return {}
+
+
+def pitcher_score(stat: Dict[str, Any]) -> Tuple[float, List[str]]:
+    if not stat:
+        return 15.0, ["Probable pitcher stats missing"]
+    notes = []
+    era = float(stat.get("era", 4.5) or 4.5)
+    whip = float(stat.get("whip", 1.35) or 1.35)
+    k9 = float(stat.get("strikeoutsPer9Inn", 8.0) or 8.0)
+    bb9 = float(stat.get("walksPer9Inn", 3.2) or 3.2)
+    innings = float(stat.get("inningsPitched", 0) or 0)
+    kbb = k9 - bb9
+    score = 15
+    score += clamp((4.50 - era) * 3.0, -8, 8)
+    score += clamp((1.30 - whip) * 12.0, -6, 6)
+    score += clamp((kbb - 4.5) * 1.3, -6, 6)
+    if innings < 20:
+        score -= 2
+        notes.append("Small SP sample")
+    if era < 3.5 and whip < 1.25: notes.append("Strong SP profile")
+    if kbb < 3: notes.append("Low K-BB signal")
+    return clamp(score, 0, 30), notes
+
+
+def offense_score(stats: Dict[str, Any]) -> Tuple[float, List[str]]:
+    season = stats.get("season", {}) if stats else {}
+    recent = stats.get("recent", {}) if stats else {}
+    notes = []
+    ops = float(season.get("ops", .710) or .710)
+    avg = float(season.get("avg", .245) or .245)
+    runs = float(season.get("runs", 0) or 0)
+    recent_ops = float(recent.get("ops", ops) or ops)
+    score = 12.5
+    score += clamp((ops - .710) * 45, -8, 8)
+    score += clamp((avg - .245) * 35, -3, 3)
+    score += clamp((recent_ops - ops) * 25, -4, 4)
+    if recent_ops > ops + .050: notes.append("Recent offense heating up")
+    if ops < .675: notes.append("Below-average offense")
+    return clamp(score, 0, 25), notes
+
+
+def bullpen_team_pitching_score(stats: Dict[str, Any]) -> Tuple[float, List[str]]:
+    # This is not true bullpen-only unless a paid feed is added. It uses team pitching as a proxy.
+    season = stats.get("season", {}) if stats else {}
+    recent = stats.get("recent", {}) if stats else {}
+    notes = []
+    era = float(season.get("era", 4.30) or 4.30)
+    whip = float(season.get("whip", 1.32) or 1.32)
+    recent_era = float(recent.get("era", era) or era)
+    score = 7.5
+    score += clamp((4.30 - era) * 1.5, -4, 4)
+    score += clamp((1.32 - whip) * 6, -3, 3)
+    score += clamp((era - recent_era) * 0.8, -3, 3)
+    if recent_era > era + .75: notes.append("Recent pitching/bullpen risk")
+    if recent_era < era - .75: notes.append("Recent run prevention strong")
+    return clamp(score, 0, 15), notes
+
+
+def environment_score(park_factor: float, weather: Dict[str, Any], is_home: bool) -> Tuple[float, List[str]]:
+    # Moneyline environment mostly affects volatility, not side direction. We score lower for chaos.
+    notes = []
+    score = 7.0
+    if park_factor >= 1.08:
+        score -= 1.5; notes.append("High-run park increases chaos")
+    if park_factor <= .94:
+        score += .5; notes.append("Run-suppressing park")
+    try:
+        wind = float(weather.get("wind_speed_10m", 0) or 0)
+        temp = float(weather.get("temperature_2m", 70) or 70)
+        precip = float(weather.get("precipitation_probability", 0) or 0)
+        if wind > 15: score -= 1.0; notes.append("Wind risk")
+        if temp > 88: score -= .5; notes.append("Hot-weather run boost")
+        if precip > 40: score -= 1.5; notes.append("Rain/delay risk")
+    except Exception:
+        pass
+    return clamp(score, 0, 10), notes
+
+
+def market_edge_score(model_pct: float, implied_pct: float) -> float:
+    edge = (model_pct - implied_pct) * 100
+    return clamp(10 + edge * 1.6, 0, 20)
+
+
+def tier_from(edge_pct: float, score: float, odds: float, risk_flags: List[str]) -> str:
+    if "Game started" in risk_flags:
+        return "No Bet"
+    if odds < -240 or odds > 180:
+        if score >= 82 and edge_pct >= 6:
+            return "B+"
+        return "Lean"
+    if edge_pct >= 5 and score >= 80:
+        return "A"
+    if edge_pct >= 3 and score >= 74:
+        return "B+"
+    if edge_pct >= 1.5 and score >= 66:
+        return "B"
+    if edge_pct > 0 and score >= 60:
+        return "Lean"
+    return "No Bet"
+
+
+def slate_status(qlegs: int, tier_a: int, tier_bp: int) -> Tuple[str, str]:
+    if qlegs >= 6: return "STRONG BOARD", "5-leg main + optional 6th"
+    if qlegs == 5: return "PLAYABLE BOARD", "5-leg main ticket"
+    if qlegs in (3,4): return "LIMITED BOARD", "3–4 leg card"
+    if qlegs == 2: return "WEAK BOARD", "Singles or tiny 2-leg"
+    if qlegs == 1: return "VERY WEAK", "Single only"
+    return "NO PLAY", "No serious play"
+
+
+def grade_from(qlegs: int, avg_edge: float) -> str:
+    val = qlegs * 8 + avg_edge * 5
+    if val >= 65: return "A-"
+    if val >= 52: return "B+"
+    if val >= 42: return "B-"
+    if val >= 30: return "C+"
+    return "D"
+
+
+def parse_odds_events(odds_events: List[dict]) -> Dict[Tuple[str, str, str], dict]:
+    # Key by sorted team names + commencement to match later.
+    out = {}
+    for ev in odds_events:
+        home = ev.get("home_team", "")
+        away = ev.get("away_team", "")
+        start = ev.get("commence_time", "")
+        key = tuple(sorted([home, away]) + [start[:10]])
+        outcomes = []
+        for book in ev.get("bookmakers", []):
+            btitle = book.get("title", book.get("key", ""))
+            for market in book.get("markets", []):
+                if market.get("key") != "h2h":
+                    continue
+                for o in market.get("outcomes", []):
+                    outcomes.append({"team": o.get("name"), "price": o.get("price"), "book": btitle})
+        out[key] = {"home": home, "away": away, "start": start, "outcomes": outcomes, "raw": ev}
+    return out
+
+
+def best_price_for_team(outcomes: List[dict], team: str) -> Tuple[Optional[float], str, float]:
+    rows = [o for o in outcomes if o.get("team") == team and o.get("price") is not None]
+    if not rows:
+        return np.nan, "", np.nan
+    # For American odds, higher price is always better (+120 > +105; -110 > -130)
+    best = sorted(rows, key=lambda x: x["price"], reverse=True)[0]
+    implieds = [american_to_implied(r["price"]) for r in rows]
+    return best["price"], best["book"], float(np.mean(implieds))
+
+
+def no_vig_market_prob(team_avg_imp: float, opp_avg_imp: float) -> float:
+    s = team_avg_imp + opp_avg_imp
+    if not s or pd.isna(s):
+        return np.nan
+    return team_avg_imp / s
+
+
+def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    st.session_state["errors"] = []
+    odds_events = fetch_odds(api_key, regions, bookmakers)
+    schedule = fetch_schedule(day)
+    park_df = load_park_data()
+    odds_map = parse_odds_events(odds_events)
+    rows = []
+    warnings = []
+
+    for game in schedule:
+        teams = game.get("teams", {})
+        home_info = teams.get("home", {})
+        away_info = teams.get("away", {})
+        home_team = home_info.get("team", {})
+        away_team = away_info.get("team", {})
+        home = home_team.get("name", "")
+        away = away_team.get("name", "")
+        venue = game.get("venue", {}).get("name", "")
+        start_iso = game.get("gameDate", "")
+        game_state = game.get("status", {}).get("abstractGameState", "")
+        key_date = start_iso[:10]
+        odds_key = tuple(sorted([home, away]) + [key_date])
+        odds_event = odds_map.get(odds_key)
+        # If exact-date name match failed, try team pair only.
+        if odds_event is None:
+            for k, v in odds_map.items():
+                if set(k[:2]) == set([home, away]):
+                    odds_event = v
+                    break
+        outcomes = odds_event.get("outcomes", []) if odds_event else []
+
+        park_row = park_df[park_df["venue"].str.lower() == venue.lower()]
+        if park_row.empty:
+            park_factor, lat, lon = 1.00, np.nan, np.nan
+        else:
+            park_factor = float(park_row.iloc[0]["park_factor"])
+            lat, lon = float(park_row.iloc[0]["lat"]), float(park_row.iloc[0]["lon"])
+        weather = fetch_weather(lat, lon, start_iso) if pd.notna(lat) else {}
+
+        # Probable pitchers
+        home_pp = home_info.get("probablePitcher", {}) or {}
+        away_pp = away_info.get("probablePitcher", {}) or {}
+        home_pp_stats = fetch_pitcher_stats(home_pp.get("id")) if home_pp.get("id") else {}
+        away_pp_stats = fetch_pitcher_stats(away_pp.get("id")) if away_pp.get("id") else {}
+
+        # Team stats
+        home_hit = fetch_team_stats(home_team.get("id"), "hitting") if home_team.get("id") else {}
+        away_hit = fetch_team_stats(away_team.get("id"), "hitting") if away_team.get("id") else {}
+        home_pitch = fetch_team_stats(home_team.get("id"), "pitching") if home_team.get("id") else {}
+        away_pitch = fetch_team_stats(away_team.get("id"), "pitching") if away_team.get("id") else {}
+
+        matchup = [
+            {"team": home, "opp": away, "team_id": home_team.get("id"), "is_home": True, "pp": home_pp, "pp_stats": home_pp_stats, "opp_pp_stats": away_pp_stats, "hit": home_hit, "pitch": home_pitch, "opp_hit": away_hit, "opp_pitch": away_pitch, "record": home_info.get("leagueRecord", {}), "opp_record": away_info.get("leagueRecord", {})},
+            {"team": away, "opp": home, "team_id": away_team.get("id"), "is_home": False, "pp": away_pp, "pp_stats": away_pp_stats, "opp_pp_stats": home_pp_stats, "hit": away_hit, "pitch": away_pitch, "opp_hit": home_hit, "opp_pitch": home_pitch, "record": away_info.get("leagueRecord", {}), "opp_record": home_info.get("leagueRecord", {})},
+        ]
+        # Calculate category raw scores for both teams then compare.
+        cats = {}
+        for m in matchup:
+            sp, sp_notes = pitcher_score(m["pp_stats"])
+            off, off_notes = offense_score(m["hit"])
+            bp, bp_notes = bullpen_team_pitching_score(m["pitch"])
+            env, env_notes = environment_score(park_factor, weather, m["is_home"])
+            cats[m["team"]] = {"sp": sp, "off": off, "bp": bp, "env": env, "notes": sp_notes + off_notes + bp_notes + env_notes}
+
+        for m in matchup:
+            opp_team = m["opp"]
+            team = m["team"]
+            odds, book, team_avg_imp = best_price_for_team(outcomes, team)
+            opp_odds, opp_book, opp_avg_imp = best_price_for_team(outcomes, opp_team)
+            implied = american_to_implied(odds) if pd.notna(odds) else np.nan
+            market_consensus = no_vig_market_prob(team_avg_imp, opp_avg_imp)
+
+            team_record = norm_pct(m.get("record", {}).get("pct"), .5)
+            opp_record = norm_pct(m.get("opp_record", {}).get("pct"), .5)
+            record_edge = (team_record - opp_record) * 12
+
+            sp_edge = (cats[team]["sp"] - cats[opp_team]["sp"]) / 30 * 12
+            off_edge = (cats[team]["off"] - cats[opp_team]["off"]) / 25 * 8
+            bp_edge = (cats[team]["bp"] - cats[opp_team]["bp"]) / 15 * 5
+            home_edge = 2.2 if m["is_home"] else -0.8
+            market_anchor = ((market_consensus - .5) * 40) if pd.notna(market_consensus) else 0
+            model_pct = .50 + (market_anchor + record_edge + sp_edge + off_edge + bp_edge + home_edge) / 100
+            model_pct = clamp(model_pct, .25, .75)
+
+            edge_pct = (model_pct - implied) * 100 if pd.notna(implied) else np.nan
+            market_points = market_edge_score(model_pct, implied) if pd.notna(implied) else 0
+            total_score = cats[team]["sp"] + cats[team]["off"] + cats[team]["bp"] + market_points + cats[team]["env"]
+            risk_flags = []
+            if not m["pp"]: risk_flags.append("Pitcher TBD")
+            if not outcomes: risk_flags.append("Odds missing")
+            if game_state != "Preview": risk_flags.append("Game started")
+            if any("risk" in n.lower() for n in cats[team]["notes"]): risk_flags.append("Bullpen/Weather risk")
+            if odds < -220: risk_flags.append("Expensive favorite")
+            if odds > 160: risk_flags.append("Long dog")
+            tier = tier_from(edge_pct if pd.notna(edge_pct) else -99, total_score, odds if pd.notna(odds) else 0, risk_flags)
+            if tier in ["A", "B+"] and "Pitcher TBD" in risk_flags:
+                tier = "B"
+
+            if "Pitcher TBD" in risk_flags:
+                warnings.append(f"{team}: probable pitcher missing")
+            if odds_event and abs((team_avg_imp if pd.notna(team_avg_imp) else 0) - (implied if pd.notna(implied) else 0)) > .025:
+                risk_flags.append("Shop price")
+
+            rows.append({
+                "Start": pd.to_datetime(start_iso, utc=True).tz_convert(EASTERN).strftime("%-I:%M %p") if start_iso else "",
+                "Game": f"{away} @ {home}",
+                "Team": team,
+                "Abbr": TEAM_ALIASES.get(team, team[:3].upper()),
+                "Opponent": opp_team,
+                "Home/Away": "Home" if m["is_home"] else "Away",
+                "Venue": venue,
+                "Odds": odds,
+                "Book": book,
+                "Implied %": implied * 100 if pd.notna(implied) else np.nan,
+                "Market %": market_consensus * 100 if pd.notna(market_consensus) else np.nan,
+                "Model Win %": model_pct * 100,
+                "Edge %": edge_pct,
+                "Score": round(total_score, 1),
+                "Tier": tier,
+                "Risk": ", ".join(risk_flags) if risk_flags else "Clean",
+                "Probable Pitcher": m["pp"].get("fullName", "TBD") if m["pp"] else "TBD",
+                "SP Score": round(cats[team]["sp"], 1),
+                "Offense Score": round(cats[team]["off"], 1),
+                "Bullpen Proxy": round(cats[team]["bp"], 1),
+                "Market Score": round(market_points, 1),
+                "Environment Score": round(cats[team]["env"], 1),
+                "Notes": "; ".join(cats[team]["notes"][:5]) or "No major flags",
+                "Temp": weather.get("temperature_2m", np.nan),
+                "Wind": weather.get("wind_speed_10m", np.nan),
+                "Precip %": weather.get("precipitation_probability", np.nan),
+                "Park Factor": park_factor,
+            })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False])
+    meta = {"warnings": sorted(set(warnings)), "errors": st.session_state.get("errors", []), "odds_events": len(odds_events), "schedule_games": len(schedule)}
+    return df, meta
+
+
+def format_odds(o):
+    try:
+        return f"{int(o):+d}"
+    except Exception:
+        return ""
+
+
+def style_tier(t):
+    if t == "A": return "badge badge-a"
+    if t == "B+": return "badge badge-b"
+    if t == "B": return "badge badge-b"
+    if t == "Lean": return "badge badge-lean"
+    return "badge badge-no"
+
+
+def render_metric(title, value, subtitle="", color=""):
+    st.markdown(f"""
+    <div class='metric-card'>
+      <div class='metric-title'>{title}</div>
+      <div class='metric-value {color}'>{value}</div>
+      <div class='small-note'>{subtitle}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def recommended_tickets(qdf: pd.DataFrame) -> pd.DataFrame:
+    if qdf.empty:
+        return pd.DataFrame()
+    core = qdf.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).copy()
+    # Custom ranking: A > B+ > B > Lean
+    rankmap = {"A": 0, "B+": 1, "B": 2, "Lean": 3}
+    core["tier_rank"] = core["Tier"].map(rankmap).fillna(9)
+    core = core.sort_values(["tier_rank", "Edge %", "Score"], ascending=[True, False, False])
+    rows = []
+    for n in [1,2,3,4,5,6]:
+        legs = core.head(n)
+        if len(legs) < n: continue
+        odds_list = legs["Odds"].dropna().tolist()
+        est_odds = parlay_american(odds_list)
+        hit = np.prod(legs["Model Win %"] / 100) * 100
+        status = "Supported"
+        if n >= 5 and len(core[core["Tier"].isin(["A", "B+"])]) < n: status = "Not recommended"
+        if n == 6: status = "High risk booster"
+        rows.append({"Ticket Type": f"{n}-Leg" if n > 1 else "Single", "Legs": n, "Estimated Odds": format_odds(est_odds) if est_odds is not None else "", "Est. Hit %": round(hit, 1), "Status": status, "Teams": " / ".join(legs["Abbr"].tolist())})
+    return pd.DataFrame(rows)
+
+
+def main():
+    st.markdown("# ⚾ MLB MONEYLINE PARLAY COMMAND CENTER")
+    st.caption("Live odds + MLB slate + automated scoring + ticket builder. Informational only. Bet responsibly.")
+
+    with st.sidebar:
+        st.header("Controls")
+        today = datetime.now(EASTERN).date()
+        target_date = st.date_input("Slate date", today)
+        regions = st.selectbox("Sportsbook region", ["us", "us2", "uk", "eu", "au"], index=0)
+        bookmakers = st.text_input("Bookmakers filter (optional)", value="", placeholder="fanduel,draftkings,betmgm")
+        min_edge = st.slider("Qualified min edge %", 0.0, 8.0, 1.5, 0.5)
+        max_fav = st.slider("Max favorite price", -300, -120, -240, 5)
+        max_dog = st.slider("Max underdog price", 100, 250, 180, 5)
+        st.divider()
+        api_key = ""
+        try:
+            api_key = st.secrets.get("ODDS_API_KEY", "")
+        except Exception:
+            api_key = os.environ.get("ODDS_API_KEY", "")
+        if not api_key:
+            api_key = st.text_input("Odds API key", type="password")
+        refresh = st.button("🔄 Refresh odds + model", type="primary", use_container_width=True)
+        st.caption("On Streamlit Cloud, store ODDS_API_KEY in app secrets so it is not public.")
+
+    if not api_key:
+        st.warning("Add your The Odds API key in Streamlit secrets or paste it in the sidebar to run the dashboard.")
+        st.stop()
+
+    if refresh:
+        fetch_odds.clear(); fetch_schedule.clear(); fetch_team_stats.clear(); fetch_pitcher_stats.clear(); fetch_weather.clear()
+
+    with st.spinner("Loading live odds, MLB slate, probable pitchers, team stats, and weather..."):
+        df, meta = build_board(target_date, api_key, regions, bookmakers)
+
+    if df.empty:
+        st.error("No slate/odds data loaded. Check API key, date, and any API errors below.")
+        if meta.get("errors"):
+            st.code("\n".join(meta["errors"][:10]))
+        st.stop()
+
+    # Apply user risk filters for qualification. Keep full board intact.
+    eligible = df[(df["Edge %"] >= min_edge) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog) & (df["Tier"].isin(["A", "B+", "B"]))].copy()
+    qualified = eligible[eligible["Tier"].isin(["A", "B+"])].copy()
+    tier_a = int((qualified["Tier"] == "A").sum())
+    tier_bp = int((qualified["Tier"] == "B+").sum())
+    qlegs = len(qualified)
+    avg_edge = qualified["Edge %"].mean() if qlegs else 0
+    status, play_type = slate_status(qlegs, tier_a, tier_bp)
+    grade = grade_from(qlegs, avg_edge)
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Command Center", "Full Slate", "Ticket Builder", "Team Detail", "Results / Export"])
+
+    with tab1:
+        c1,c2,c3,c4,c5,c6 = st.columns(6)
+        with c1: render_metric("Games Today", meta.get("schedule_games", 0), "View full slate", "blue")
+        with c2: render_metric("Qualified Legs", qlegs, "Tier A/B+", "green")
+        with c3: render_metric("Tier A Legs", tier_a, "Best plays", "green")
+        with c4: render_metric("Tier B+ Legs", tier_bp, "Solid plays", "yellow")
+        with c5: render_metric("Best Play Type", play_type, "Recommended", "yellow")
+        hit3 = np.prod((qualified.head(3)["Model Win %"] / 100)) * 100 if len(qualified) >= 3 else 0
+        with c6: render_metric("Est. Hit % (3-leg)", f"{hit3:.1f}%" if hit3 else "—", "Based on top 3", "")
+
+        left, right = st.columns([2,1])
+        with left:
+            st.markdown(f"<div class='panel'><div class='section-title'>Main Recommended Ticket</div>", unsafe_allow_html=True)
+            if qlegs >= 5:
+                main_ticket = qualified.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).head(5)
+                st.dataframe(main_ticket[["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Tier","Risk","Probable Pitcher"]], use_container_width=True, hide_index=True)
+                odds_val = parlay_american(main_ticket["Odds"].tolist())
+                st.success(f"Recommended 5-leg main ticket: {format_odds(odds_val)} estimated odds. Slate grade: {grade}.")
+            elif qlegs >= 3:
+                main_ticket = qualified.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).head(qlegs)
+                st.dataframe(main_ticket[["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Tier","Risk","Probable Pitcher"]], use_container_width=True, hide_index=True)
+                odds_val = parlay_american(main_ticket["Odds"].tolist())
+                st.warning(f"{status}: only {qlegs} qualified legs. Smaller {qlegs}-leg card supported at about {format_odds(odds_val)}. Do not force a 5-leg ticket unless using boosters.")
+            elif qlegs > 0:
+                st.dataframe(qualified[["Team","Opponent","Odds","Book","Model Win %","Edge %","Tier","Risk"]], use_container_width=True, hide_index=True)
+                st.warning(f"{status}: use singles or a tiny 2-leg only. No main parlay.")
+            else:
+                st.error("No qualified legs. No serious play today.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("<div class='panel'><div class='section-title'>All Qualified Legs</div>", unsafe_allow_html=True)
+            show_cols = ["Start","Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk"]
+            st.dataframe(qualified[show_cols], use_container_width=True, hide_index=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with right:
+            st.markdown("<div class='panel'><div class='section-title'>Slate Status</div>", unsafe_allow_html=True)
+            st.markdown(f"### {status}")
+            st.markdown(f"**Slate Grade:** {grade}")
+            st.markdown(f"**Recommended:** {play_type}")
+            st.caption(f"Last refresh: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("<div class='panel'><div class='section-title'>Optional Booster Leg</div>", unsafe_allow_html=True)
+            boosters = eligible[~eligible.index.isin(qualified.head(5).index)].sort_values(["Edge %","Score"], ascending=[False, False]).head(3)
+            if boosters.empty and len(df) > 0:
+                boosters = df[(df["Tier"].isin(["B","Lean"])) & (df["Edge %"] > 0)].sort_values(["Edge %","Score"], ascending=[False, False]).head(3)
+            if boosters.empty:
+                st.caption("No booster leg recommended.")
+            else:
+                st.dataframe(boosters[["Team","Odds","Model Win %","Edge %","Tier","Risk"]], use_container_width=True, hide_index=True)
+                st.caption("Optional only. Use for higher payout only if you accept more risk.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("<div class='panel'><div class='section-title red'>Trap Favorites / Do Not Use</div>", unsafe_allow_html=True)
+            traps = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(8)
+            if traps.empty:
+                st.caption("No major trap favorites detected.")
+            else:
+                st.dataframe(traps[["Team","Opponent","Odds","Model Win %","Implied %","Edge %","Risk"]], use_container_width=True, hide_index=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("<div class='panel'><div class='section-title yellow'>Data Warnings</div>", unsafe_allow_html=True)
+            warning_lines = meta.get("warnings", [])[:8]
+            if warning_lines:
+                for w in warning_lines:
+                    st.write(f"⚠️ {w}")
+            else:
+                st.caption("No major API warnings.")
+            st.caption("Confirmed lineups are not included in this free-data version. Refresh closer to first pitch.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab2:
+        st.subheader("Full Slate Board")
+        tier_filter = st.multiselect("Tier filter", ["A","B+","B","Lean","No Bet"], default=["A","B+","B","Lean","No Bet"])
+        fdf = df[df["Tier"].isin(tier_filter)].copy()
+        st.dataframe(fdf[["Start","Game","Team","Opponent","Home/Away","Odds","Book","Market %","Model Win %","Implied %","Edge %","Score","Tier","Risk","Probable Pitcher","Notes"]], use_container_width=True, hide_index=True)
+
+    with tab3:
+        st.subheader("Auto Ticket Builder")
+        ticket_df = recommended_tickets(eligible if not eligible.empty else df[df["Edge %"] > 0])
+        if ticket_df.empty:
+            st.info("No ticket combinations available.")
+        else:
+            st.dataframe(ticket_df, use_container_width=True, hide_index=True)
+        st.markdown("### Core vs Boosters")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Core Legs**")
+            st.dataframe(qualified.head(6)[["Team","Odds","Model Win %","Edge %","Tier","Risk"]], use_container_width=True, hide_index=True)
+        with c2:
+            st.markdown("**Optional Add-Ons**")
+            st.dataframe(boosters[["Team","Odds","Model Win %","Edge %","Tier","Risk"]] if 'boosters' in locals() and not boosters.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
+
+    with tab4:
+        st.subheader("Team / Game Breakdown")
+        teams = df["Team"].tolist()
+        selected = st.selectbox("Select team", teams)
+        row = df[df["Team"] == selected].iloc[0]
+        c1, c2, c3 = st.columns([1,1,1])
+        with c1:
+            st.metric("Model Win Probability", f"{row['Model Win %']:.1f}%", f"Edge {row['Edge %']:.1f}%")
+            st.metric("Moneyline", format_odds(row["Odds"]), row["Book"])
+            st.metric("Tier", row["Tier"], row["Risk"])
+        with c2:
+            breakdown = pd.DataFrame({
+                "Category": ["Starting Pitcher","Offense","Bullpen Proxy","Market Edge","Environment"],
+                "Score": [row["SP Score"], row["Offense Score"], row["Bullpen Proxy"], row["Market Score"], row["Environment Score"]],
+                "Max": [30,25,15,20,10]
+            })
+            st.dataframe(breakdown, use_container_width=True, hide_index=True)
+        with c3:
+            st.write("**Key Notes**")
+            for note in str(row["Notes"]).split(";"):
+                st.write(f"✅ {note.strip()}")
+            st.write("**Weather**")
+            st.write(f"Temp: {row['Temp']}°F | Wind: {row['Wind']} mph | Precip: {row['Precip %']}%")
+            st.write(f"Park Factor: {row['Park Factor']}")
+
+    with tab5:
+        st.subheader("Results / Export")
+        st.write("Export today’s board and append your results later. The CSV tracker is included in the ZIP.")
+        st.download_button("Download today’s board CSV", data=df.to_csv(index=False), file_name=f"mlb_board_{target_date}.csv", mime="text/csv")
+        st.download_button("Download qualified legs CSV", data=qualified.to_csv(index=False), file_name=f"qualified_legs_{target_date}.csv", mime="text/csv")
+        try:
+            tracker = pd.read_csv("results_tracker.csv")
+            st.dataframe(tracker, use_container_width=True, hide_index=True)
+        except Exception:
+            st.info("No tracker file found yet.")
+        if meta.get("errors"):
+            with st.expander("API errors / diagnostics"):
+                st.code("\n".join(meta["errors"][:20]))
+
+
+if __name__ == "__main__":
+    main()
