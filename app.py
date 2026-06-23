@@ -756,7 +756,7 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     """
     html = f"""
     {css}<div class='cc'>
-      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v8 tightened model</div></div>
+      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v9 strict edge model</div></div>
       <div class='grid'>
         <div class='rail'>
           <div class='label'>Today's Slate</div><div style='margin:10px 0 8px;'><span class='datebox'>{target_date.strftime('%a').upper()}<br>{target_date.strftime('%b %-d').upper()}</span><span class='games'>{meta.get('schedule_games',0)}</span></div><div class='note'>games today</div><hr style='border-color:#20384c;margin:14px 0;'>
@@ -884,7 +884,7 @@ def main():
     boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
     traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
     render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
-    st.caption("v8 tightened model: Suggested legs require at least the selected minimum edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
+    st.caption("v9 strict edge model: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
 
     with st.expander("Advanced views: full slate, ticket builder, diagnostics", expanded=False):
         st.subheader("Full Slate Board")
@@ -1403,8 +1403,6 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
             # Do not overstate confidence in odds-first mode.
             if tier == "A" and not game:
                 tier = "B+"
-            if pd.notna(odds) and tier == "No Bet" and score >= 54:
-                tier = "Lean"  # makes sure suggested/watchlist legs still appear with prices
             try:
                 start_fmt = pd.to_datetime(start_iso, utc=True).tz_convert(EASTERN).strftime("%-I:%M %p")
             except Exception:
@@ -1432,7 +1430,7 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
                 "Bullpen Proxy": 7.5,
                 "Market Score": round(market_points, 1),
                 "Environment Score": 6.0,
-                "Notes": "v7 odds-first model. Use Tier A/B+ for stronger legs; Lean/B are smaller-card/watchlist candidates.",
+                "Notes": "v9 strict model. Suggested legs require real edge; Lean/Thin Edge are watchlist only.",
                 "Temp": np.nan,
                 "Wind": np.nan,
                 "Precip %": np.nan,
@@ -1448,7 +1446,7 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
         return df, meta
     df = df.sort_values(["Edge %", "Score"], ascending=[False, False])
     meta = {
-        "warnings": ["v7 odds-first mode active. This prioritizes usable live odds and suggested legs. Pitcher/team stat enrichment appears when MLB schedule matches the odds event."],
+        "warnings": ["v9 odds-first mode active. This prioritizes usable live odds and suggested legs. Pitcher/team stat enrichment appears when MLB schedule matches the odds event."],
         "errors": st.session_state.get("errors", []),
         "odds_events": len(odds_events),
         "odds_outcomes": outcomes_total,
@@ -1462,26 +1460,49 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
 
 
 def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int):
+    """v9 strict qualification.
+
+    Official suggested legs must have a real positive edge and a Tier of B or better.
+    Lean/Thin Edge rows are watchlist only and should never populate the recommended card.
+    Negative-edge teams are never suggested, even when the score is high.
+    """
     dfx = df.copy()
     for col in ["Edge %", "Score", "Odds", "Model Win %"]:
         if col in dfx.columns:
             dfx[col] = pd.to_numeric(dfx[col], errors="coerce")
+
     price_ok = (dfx["Odds"].notna()) & (dfx["Odds"] >= max_fav) & (dfx["Odds"] <= max_dog)
-    # Eligible = legs that can actually be placed and are not too ugly on price/model.
-    eligible = dfx[price_ok & (dfx["Model Win %"].fillna(0) >= 45)].copy()
-    # Suggested legs are intentionally broader than full-ticket legs.
-    qualified = eligible[(eligible["Edge %"].fillna(-99) >= min_edge) | (eligible["Score"].fillna(0) >= 55)].copy()
-    if qualified.empty:
-        qualified = eligible.sort_values(["Edge %", "Score"], ascending=[False, False]).head(5).copy()
-    # Full 5-leg qualification remains stricter.
-    full_ticket_qualified = eligible[eligible["Tier"].isin(["A", "B+"]) & (eligible["Edge %"].fillna(-99) >= max(0.0, min_edge))].copy()
-    best_available = qualified.sort_values(["Edge %", "Score"], ascending=[False, False]).head(10) if not qualified.empty else eligible.sort_values(["Edge %", "Score"], ascending=[False, False]).head(10)
+    base = dfx[price_ok & (dfx["Model Win %"].fillna(0) >= 45)].copy()
+
+    # Minimum for an official smaller-card suggestion. Default should be 2.0%.
+    hard_min_edge = max(float(min_edge), 2.0)
+
+    eligible = base[
+        (base["Edge %"].fillna(-99) >= hard_min_edge)
+        & (base["Tier"].isin(["A", "B+", "B"]))
+    ].copy()
+
+    qualified = eligible.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).copy()
+
+    # Full-ticket legs are stricter than smaller-card suggestions.
+    full_ticket_qualified = base[
+        (base["Edge %"].fillna(-99) >= max(hard_min_edge, 3.0))
+        & (base["Tier"].isin(["A", "B+"]))
+    ].copy()
+
+    # Watchlist shows the best available teams but does not call them recommendations.
+    watch = base[
+        (base["Edge %"].fillna(-99) > -0.5)
+        & (~base.index.isin(qualified.index))
+    ].sort_values(["Edge %", "Score"], ascending=[False, False]).head(10).copy()
+
+    best_available = qualified if not qualified.empty else watch
     return eligible, qualified, full_ticket_qualified, best_available
 
 def main():
     st.markdown("""
     <div class='hero'>
-      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v7 odds-first suggestions</span></div>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v9 strict edge model</span></div>
       <div class='hero-sub'>Live odds, model scoring, ticket builder, trap favorites, boosters, diagnostics, and slate warnings.</div>
     </div>
     """, unsafe_allow_html=True)
@@ -1500,7 +1521,7 @@ def main():
         c5, c6, c7, c8 = st.columns([1,1,1,1])
         default_edge = 1.5 if model_mode == "Aggressive" else (2.0 if model_mode == "Balanced" else 3.0)
         with c5:
-            min_edge = st.slider("Smaller-card min edge %", -3.0, 8.0, default_edge, 0.5)
+            min_edge = st.slider("Official suggested-leg min edge %", 1.0, 8.0, default_edge, 0.5)
         with c6:
             max_fav = st.slider("Max favorite price", -300, -120, -260, 5)
         with c7:
@@ -1515,7 +1536,7 @@ def main():
             api_key = st.text_input("Odds API key", type="password")
         st.caption("If no odds appear, open the Diagnostics page below. v6 will show odds counts and fallback status without hiding it in an expander.")
     if 'target_date' not in locals():
-        target_date=today; regions='us'; bookmakers=''; model_mode='Balanced'; min_edge=-0.5; max_fav=-260; max_dog=200; refresh=False
+        target_date=today; regions='us'; bookmakers=''; model_mode='Balanced'; min_edge=2.0; max_fav=-260; max_dog=200; refresh=False
         try:
             api_key=st.secrets.get("ODDS_API_KEY", "")
         except Exception:
