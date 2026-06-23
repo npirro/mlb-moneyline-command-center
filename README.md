@@ -1,11 +1,22 @@
-# MLB Moneyline Command Center v11
+# MLB Moneyline Command Center v13 — Bet Tracker
 
-v11 changes the recommendation engine from pure edge-first to practical winner-first:
+Deploy this Streamlit app from GitHub. It includes the v12 three-bucket winner-first model plus an integrated Bet Tracker page.
 
-- Suggested legs require 52%+ model win probability, positive value, and a reasonable score.
-- Core/full-ticket legs stay stricter: 54%+ win probability, stronger edge, 70+ score.
-- Value dogs are separated into watchlist/singles-only.
-- Only one team per game can appear in suggested legs.
-- If both sides of a game are too close, the app skips the game.
+## Setup
+1. Upload these files to your GitHub repo.
+2. In Streamlit Community Cloud, set the main file path to `app.py`.
+3. Add this in Streamlit Secrets:
 
-Deploy by replacing your existing GitHub repo files with these files, committing changes, then rebooting Streamlit.
+```toml
+ODDS_API_KEY = "your_the_odds_api_key_here"
+```
+
+## v13 changes
+- Adds a real **Bet Tracker** navigation page.
+- Save Core, Suggested Winner-First, Watchlist, or manual full-board selections to tracker.
+- Logs Ticket ID, date, bucket, ticket type, team, odds, model %, edge, score, tier, risk, stake, result, miss reason, read quality, and notes.
+- Allows result editing and tracker CSV download.
+- Adds performance summaries by bucket, ticket type, and miss reason.
+
+## Usage
+Open the app, refresh odds/model, then go to **Bet Tracker** and save whichever legs you are testing. After games finish, update Result and Miss Reason.

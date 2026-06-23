@@ -1,1 +1,1 @@
-date,ticket_type,team,opponent,odds,model_win_pct,implied_pct,edge,tier,result,read_quality,notes
+Ticket ID,Date,Bucket,Ticket Type,Team,Opponent,Odds,Book,Model Win %,Implied %,Edge %,Score,Tier,Risk,Stake,Result,Profit/Loss,Miss Reason,Read Quality,Notes,Logged At

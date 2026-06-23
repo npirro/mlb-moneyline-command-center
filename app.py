@@ -756,7 +756,7 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     """
     html = f"""
     {css}<div class='cc'>
-      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v12 three-bucket view</div></div>
+      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v13 bet tracker</div></div>
       <div class='grid'>
         <div class='rail'>
           <div class='label'>Today's Slate</div><div style='margin:10px 0 8px;'><span class='datebox'>{target_date.strftime('%a').upper()}<br>{target_date.strftime('%b %-d').upper()}</span><span class='games'>{meta.get('schedule_games',0)}</span></div><div class='note'>games today</div><hr style='border-color:#20384c;margin:14px 0;'>
@@ -792,6 +792,212 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     </div>
     """
     components.html(html, height=max_height, scrolling=True)
+
+
+# -----------------------------
+# v13 Bet Tracker Helpers
+# -----------------------------
+TRACKER_COLUMNS = [
+    "Ticket ID", "Date", "Bucket", "Ticket Type", "Team", "Opponent", "Odds", "Book",
+    "Model Win %", "Implied %", "Edge %", "Score", "Tier", "Risk", "Stake",
+    "Result", "Profit/Loss", "Miss Reason", "Read Quality", "Notes", "Logged At"
+]
+
+
+def tracker_path() -> str:
+    return "results_tracker.csv"
+
+
+def load_tracker() -> pd.DataFrame:
+    try:
+        t = pd.read_csv(tracker_path())
+    except Exception:
+        t = pd.DataFrame(columns=TRACKER_COLUMNS)
+    for c in TRACKER_COLUMNS:
+        if c not in t.columns:
+            t[c] = "" if c not in ["Stake", "Profit/Loss", "Odds", "Model Win %", "Implied %", "Edge %", "Score"] else np.nan
+    return t[TRACKER_COLUMNS]
+
+
+def save_tracker_df(t: pd.DataFrame) -> None:
+    for c in TRACKER_COLUMNS:
+        if c not in t.columns:
+            t[c] = ""
+    t[TRACKER_COLUMNS].to_csv(tracker_path(), index=False)
+
+
+def tracker_profit_from_american(odds, stake, result):
+    try:
+        odds = float(odds); stake = float(stake)
+    except Exception:
+        return np.nan
+    result = str(result).strip().lower()
+    if result in ["loss", "lost", "l"]:
+        return -stake
+    if result in ["push", "void", "cancelled", "p"]:
+        return 0.0
+    if result not in ["win", "won", "w"]:
+        return np.nan
+    if odds > 0:
+        return stake * (odds / 100.0)
+    return stake * (100.0 / abs(odds))
+
+
+def render_bet_tracker(df, qualified, full_ticket_qualified, best_available, target_date):
+    st.subheader("Bet Tracker")
+    st.caption("Save the current model recommendations, mark results later, and see whether the buckets are actually producing winners. This tracks legs and tickets separately by Ticket ID.")
+
+    bucket_options = {
+        "Core Parlay Legs": full_ticket_qualified.copy() if isinstance(full_ticket_qualified, pd.DataFrame) else pd.DataFrame(),
+        "Suggested Winner-First Legs": qualified.copy() if isinstance(qualified, pd.DataFrame) else pd.DataFrame(),
+        "Watchlist / Value Dogs": best_available.copy() if isinstance(best_available, pd.DataFrame) else pd.DataFrame(),
+        "Full Board Manual Select": df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(),
+    }
+
+    with st.container(border=True):
+        st.markdown("#### Save current recommendations to tracker")
+        c1, c2, c3, c4 = st.columns([1.4, 1, 1, 1])
+        with c1:
+            bucket_name = st.selectbox("Bucket to save", list(bucket_options.keys()))
+        source = bucket_options[bucket_name]
+        if bucket_name == "Watchlist / Value Dogs" and not source.empty and not qualified.empty:
+            source = source[~source.index.isin(qualified.index)]
+        if not source.empty:
+            source = source.copy().head(12)
+            source["Display"] = source.apply(lambda r: f"{r.get('Team','')} vs {r.get('Opponent','')} | {format_odds(r.get('Odds'))} | Edge {r.get('Edge %', 0):.1f}% | MW% {r.get('Model Win %', 0):.1f}%", axis=1)
+        with c2:
+            ticket_type = st.selectbox("Ticket type", ["Single", "2-Leg", "3-Leg", "4-Leg", "5-Leg", "6-Leg", "Custom"])
+        with c3:
+            stake = st.number_input("Stake", min_value=0.0, value=0.0, step=1.0)
+        with c4:
+            ticket_note = st.text_input("Ticket note", value="")
+
+        if source.empty:
+            st.info("No rows available in that bucket right now.")
+        else:
+            default_n = 1 if ticket_type == "Single" else int(ticket_type.split("-")[0]) if "-Leg" in ticket_type else min(3, len(source))
+            default_labels = source["Display"].tolist()[:min(default_n, len(source))]
+            selected_labels = st.multiselect("Choose legs to save", source["Display"].tolist(), default=default_labels)
+            preview = source[source["Display"].isin(selected_labels)].drop(columns=["Display"], errors="ignore")
+            if not preview.empty:
+                st.dataframe(_display_cols(preview, ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk"]), use_container_width=True, hide_index=True)
+            if st.button("💾 Save selected legs to tracker", type="primary", use_container_width=True):
+                if preview.empty:
+                    st.warning("Select at least one leg first.")
+                else:
+                    existing = load_tracker()
+                    ticket_id = f"{pd.to_datetime(target_date).strftime('%Y%m%d')}-{datetime.now(EASTERN).strftime('%H%M%S')}"
+                    now = datetime.now(EASTERN).strftime("%Y-%m-%d %H:%M:%S")
+                    rows = []
+                    for _, r in preview.iterrows():
+                        rows.append({
+                            "Ticket ID": ticket_id,
+                            "Date": str(target_date),
+                            "Bucket": bucket_name,
+                            "Ticket Type": ticket_type,
+                            "Team": r.get("Team", ""),
+                            "Opponent": r.get("Opponent", ""),
+                            "Odds": r.get("Odds", np.nan),
+                            "Book": r.get("Book", ""),
+                            "Model Win %": r.get("Model Win %", np.nan),
+                            "Implied %": r.get("Implied %", np.nan),
+                            "Edge %": r.get("Edge %", np.nan),
+                            "Score": r.get("Score", np.nan),
+                            "Tier": r.get("Tier", ""),
+                            "Risk": r.get("Risk", ""),
+                            "Stake": stake,
+                            "Result": "Pending",
+                            "Profit/Loss": np.nan,
+                            "Miss Reason": "",
+                            "Read Quality": "",
+                            "Notes": ticket_note,
+                            "Logged At": now,
+                        })
+                    out = pd.concat([existing, pd.DataFrame(rows)], ignore_index=True)
+                    save_tracker_df(out)
+                    st.success(f"Saved {len(rows)} leg(s) under Ticket ID {ticket_id}.")
+
+    tracker = load_tracker()
+    st.markdown("#### Tracker log")
+    if tracker.empty:
+        st.info("No tracked bets yet. Save current recommendations above to start building history.")
+        return
+
+    # Coerce numeric fields for summaries.
+    numeric_cols = ["Stake", "Profit/Loss", "Odds", "Model Win %", "Implied %", "Edge %", "Score"]
+    for c in numeric_cols:
+        tracker[c] = pd.to_numeric(tracker[c], errors="coerce")
+
+    c1, c2, c3, c4 = st.columns(4)
+    settled = tracker[tracker["Result"].astype(str).str.lower().isin(["win", "loss", "push", "won", "lost", "w", "l", "p"])]
+    wins = settled[settled["Result"].astype(str).str.lower().isin(["win", "won", "w"])]
+    losses = settled[settled["Result"].astype(str).str.lower().isin(["loss", "lost", "l"])]
+    pl = tracker["Profit/Loss"].sum(skipna=True)
+    stake_sum = tracker["Stake"].sum(skipna=True)
+    roi = (pl / stake_sum * 100) if stake_sum else 0
+    c1.metric("Tracked Legs", len(tracker))
+    c2.metric("Settled Hit Rate", f"{(len(wins)/max(1, len(wins)+len(losses))*100):.1f}%")
+    c3.metric("Profit / Loss", f"${pl:.2f}")
+    c4.metric("ROI", f"{roi:.1f}%")
+
+    st.markdown("#### Mark results")
+    st.caption("Edit Result, Profit/Loss, Miss Reason, Read Quality, or Notes, then click Save Tracker Updates. Profit/Loss can be typed manually; singles can also be auto-filled with the helper below.")
+    edited = st.data_editor(
+        tracker,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "Result": st.column_config.SelectboxColumn("Result", options=["Pending", "Win", "Loss", "Push"]),
+            "Miss Reason": st.column_config.SelectboxColumn("Miss Reason", options=["", "Starter issue", "Bullpen collapse", "Lineup issue", "Market moved", "Weather/park", "Random variance", "Bad model read", "Other"]),
+            "Read Quality": st.column_config.SelectboxColumn("Read Quality", options=["", "Good read, won", "Good read, lost randomly", "Bad read", "Too close to call"]),
+        }
+    )
+    b1, b2, b3 = st.columns([1,1,2])
+    with b1:
+        if st.button("🧮 Auto-fill single-leg P/L", use_container_width=True):
+            tmp = edited.copy()
+            for i, r in tmp.iterrows():
+                if pd.isna(r.get("Profit/Loss")) or str(r.get("Profit/Loss", "")).strip() == "":
+                    tmp.at[i, "Profit/Loss"] = tracker_profit_from_american(r.get("Odds"), r.get("Stake"), r.get("Result"))
+            save_tracker_df(tmp)
+            st.success("Auto-filled available single-leg P/L values and saved.")
+    with b2:
+        if st.button("💾 Save tracker updates", type="primary", use_container_width=True):
+            save_tracker_df(edited)
+            st.success("Tracker updated.")
+    with b3:
+        st.download_button("Download tracker CSV", data=edited.to_csv(index=False), file_name="mlb_bet_tracker.csv", mime="text/csv", use_container_width=True)
+
+    st.markdown("#### Performance breakdowns")
+    tc1, tc2 = st.columns(2)
+    with tc1:
+        by_bucket = tracker.groupby("Bucket", dropna=False).agg(
+            Legs=("Team", "count"),
+            Avg_Model_Win=("Model Win %", "mean"),
+            Avg_Edge=("Edge %", "mean"),
+            Profit_Loss=("Profit/Loss", "sum"),
+            Stake=("Stake", "sum"),
+        ).reset_index()
+        if not by_bucket.empty:
+            by_bucket["ROI %"] = np.where(by_bucket["Stake"] > 0, by_bucket["Profit_Loss"] / by_bucket["Stake"] * 100, 0)
+        st.dataframe(by_bucket, use_container_width=True, hide_index=True)
+    with tc2:
+        by_ticket = tracker.groupby("Ticket Type", dropna=False).agg(
+            Legs=("Team", "count"),
+            Profit_Loss=("Profit/Loss", "sum"),
+            Stake=("Stake", "sum"),
+        ).reset_index()
+        if not by_ticket.empty:
+            by_ticket["ROI %"] = np.where(by_ticket["Stake"] > 0, by_ticket["Profit_Loss"] / by_ticket["Stake"] * 100, 0)
+        st.dataframe(by_ticket, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Miss reason breakdown")
+    miss = tracker[tracker["Miss Reason"].astype(str).str.len() > 0]
+    if miss.empty:
+        st.caption("No miss reasons logged yet.")
+    else:
+        st.dataframe(miss.groupby("Miss Reason").size().reset_index(name="Count"), use_container_width=True, hide_index=True)
 
 def main():
     # v5 renders the mockup-style header inside the custom command-center component.
@@ -916,7 +1122,7 @@ def main():
     boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
     traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
     render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
-    st.caption("v12 three-bucket view: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
+    st.caption("v13 bet tracker: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
 
     with st.expander("Advanced views: full slate, ticket builder, diagnostics", expanded=False):
         st.subheader("Full Slate Board")
@@ -1654,11 +1860,217 @@ def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int
     best_available = qualified if not qualified.empty else watch
     return eligible, qualified, full_ticket_qualified, best_available
 
+
+# -----------------------------
+# v13 Bet Tracker Helpers
+# -----------------------------
+TRACKER_COLUMNS = [
+    "Ticket ID", "Date", "Bucket", "Ticket Type", "Team", "Opponent", "Odds", "Book",
+    "Model Win %", "Implied %", "Edge %", "Score", "Tier", "Risk", "Stake",
+    "Result", "Profit/Loss", "Miss Reason", "Read Quality", "Notes", "Logged At"
+]
+
+
+def tracker_path() -> str:
+    return "results_tracker.csv"
+
+
+def load_tracker() -> pd.DataFrame:
+    try:
+        t = pd.read_csv(tracker_path())
+    except Exception:
+        t = pd.DataFrame(columns=TRACKER_COLUMNS)
+    for c in TRACKER_COLUMNS:
+        if c not in t.columns:
+            t[c] = "" if c not in ["Stake", "Profit/Loss", "Odds", "Model Win %", "Implied %", "Edge %", "Score"] else np.nan
+    return t[TRACKER_COLUMNS]
+
+
+def save_tracker_df(t: pd.DataFrame) -> None:
+    for c in TRACKER_COLUMNS:
+        if c not in t.columns:
+            t[c] = ""
+    t[TRACKER_COLUMNS].to_csv(tracker_path(), index=False)
+
+
+def tracker_profit_from_american(odds, stake, result):
+    try:
+        odds = float(odds); stake = float(stake)
+    except Exception:
+        return np.nan
+    result = str(result).strip().lower()
+    if result in ["loss", "lost", "l"]:
+        return -stake
+    if result in ["push", "void", "cancelled", "p"]:
+        return 0.0
+    if result not in ["win", "won", "w"]:
+        return np.nan
+    if odds > 0:
+        return stake * (odds / 100.0)
+    return stake * (100.0 / abs(odds))
+
+
+def render_bet_tracker(df, qualified, full_ticket_qualified, best_available, target_date):
+    st.subheader("Bet Tracker")
+    st.caption("Save the current model recommendations, mark results later, and see whether the buckets are actually producing winners. This tracks legs and tickets separately by Ticket ID.")
+
+    bucket_options = {
+        "Core Parlay Legs": full_ticket_qualified.copy() if isinstance(full_ticket_qualified, pd.DataFrame) else pd.DataFrame(),
+        "Suggested Winner-First Legs": qualified.copy() if isinstance(qualified, pd.DataFrame) else pd.DataFrame(),
+        "Watchlist / Value Dogs": best_available.copy() if isinstance(best_available, pd.DataFrame) else pd.DataFrame(),
+        "Full Board Manual Select": df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(),
+    }
+
+    with st.container(border=True):
+        st.markdown("#### Save current recommendations to tracker")
+        c1, c2, c3, c4 = st.columns([1.4, 1, 1, 1])
+        with c1:
+            bucket_name = st.selectbox("Bucket to save", list(bucket_options.keys()))
+        source = bucket_options[bucket_name]
+        if bucket_name == "Watchlist / Value Dogs" and not source.empty and not qualified.empty:
+            source = source[~source.index.isin(qualified.index)]
+        if not source.empty:
+            source = source.copy().head(12)
+            source["Display"] = source.apply(lambda r: f"{r.get('Team','')} vs {r.get('Opponent','')} | {format_odds(r.get('Odds'))} | Edge {r.get('Edge %', 0):.1f}% | MW% {r.get('Model Win %', 0):.1f}%", axis=1)
+        with c2:
+            ticket_type = st.selectbox("Ticket type", ["Single", "2-Leg", "3-Leg", "4-Leg", "5-Leg", "6-Leg", "Custom"])
+        with c3:
+            stake = st.number_input("Stake", min_value=0.0, value=0.0, step=1.0)
+        with c4:
+            ticket_note = st.text_input("Ticket note", value="")
+
+        if source.empty:
+            st.info("No rows available in that bucket right now.")
+        else:
+            default_n = 1 if ticket_type == "Single" else int(ticket_type.split("-")[0]) if "-Leg" in ticket_type else min(3, len(source))
+            default_labels = source["Display"].tolist()[:min(default_n, len(source))]
+            selected_labels = st.multiselect("Choose legs to save", source["Display"].tolist(), default=default_labels)
+            preview = source[source["Display"].isin(selected_labels)].drop(columns=["Display"], errors="ignore")
+            if not preview.empty:
+                st.dataframe(_display_cols(preview, ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk"]), use_container_width=True, hide_index=True)
+            if st.button("💾 Save selected legs to tracker", type="primary", use_container_width=True):
+                if preview.empty:
+                    st.warning("Select at least one leg first.")
+                else:
+                    existing = load_tracker()
+                    ticket_id = f"{pd.to_datetime(target_date).strftime('%Y%m%d')}-{datetime.now(EASTERN).strftime('%H%M%S')}"
+                    now = datetime.now(EASTERN).strftime("%Y-%m-%d %H:%M:%S")
+                    rows = []
+                    for _, r in preview.iterrows():
+                        rows.append({
+                            "Ticket ID": ticket_id,
+                            "Date": str(target_date),
+                            "Bucket": bucket_name,
+                            "Ticket Type": ticket_type,
+                            "Team": r.get("Team", ""),
+                            "Opponent": r.get("Opponent", ""),
+                            "Odds": r.get("Odds", np.nan),
+                            "Book": r.get("Book", ""),
+                            "Model Win %": r.get("Model Win %", np.nan),
+                            "Implied %": r.get("Implied %", np.nan),
+                            "Edge %": r.get("Edge %", np.nan),
+                            "Score": r.get("Score", np.nan),
+                            "Tier": r.get("Tier", ""),
+                            "Risk": r.get("Risk", ""),
+                            "Stake": stake,
+                            "Result": "Pending",
+                            "Profit/Loss": np.nan,
+                            "Miss Reason": "",
+                            "Read Quality": "",
+                            "Notes": ticket_note,
+                            "Logged At": now,
+                        })
+                    out = pd.concat([existing, pd.DataFrame(rows)], ignore_index=True)
+                    save_tracker_df(out)
+                    st.success(f"Saved {len(rows)} leg(s) under Ticket ID {ticket_id}.")
+
+    tracker = load_tracker()
+    st.markdown("#### Tracker log")
+    if tracker.empty:
+        st.info("No tracked bets yet. Save current recommendations above to start building history.")
+        return
+
+    # Coerce numeric fields for summaries.
+    numeric_cols = ["Stake", "Profit/Loss", "Odds", "Model Win %", "Implied %", "Edge %", "Score"]
+    for c in numeric_cols:
+        tracker[c] = pd.to_numeric(tracker[c], errors="coerce")
+
+    c1, c2, c3, c4 = st.columns(4)
+    settled = tracker[tracker["Result"].astype(str).str.lower().isin(["win", "loss", "push", "won", "lost", "w", "l", "p"])]
+    wins = settled[settled["Result"].astype(str).str.lower().isin(["win", "won", "w"])]
+    losses = settled[settled["Result"].astype(str).str.lower().isin(["loss", "lost", "l"])]
+    pl = tracker["Profit/Loss"].sum(skipna=True)
+    stake_sum = tracker["Stake"].sum(skipna=True)
+    roi = (pl / stake_sum * 100) if stake_sum else 0
+    c1.metric("Tracked Legs", len(tracker))
+    c2.metric("Settled Hit Rate", f"{(len(wins)/max(1, len(wins)+len(losses))*100):.1f}%")
+    c3.metric("Profit / Loss", f"${pl:.2f}")
+    c4.metric("ROI", f"{roi:.1f}%")
+
+    st.markdown("#### Mark results")
+    st.caption("Edit Result, Profit/Loss, Miss Reason, Read Quality, or Notes, then click Save Tracker Updates. Profit/Loss can be typed manually; singles can also be auto-filled with the helper below.")
+    edited = st.data_editor(
+        tracker,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "Result": st.column_config.SelectboxColumn("Result", options=["Pending", "Win", "Loss", "Push"]),
+            "Miss Reason": st.column_config.SelectboxColumn("Miss Reason", options=["", "Starter issue", "Bullpen collapse", "Lineup issue", "Market moved", "Weather/park", "Random variance", "Bad model read", "Other"]),
+            "Read Quality": st.column_config.SelectboxColumn("Read Quality", options=["", "Good read, won", "Good read, lost randomly", "Bad read", "Too close to call"]),
+        }
+    )
+    b1, b2, b3 = st.columns([1,1,2])
+    with b1:
+        if st.button("🧮 Auto-fill single-leg P/L", use_container_width=True):
+            tmp = edited.copy()
+            for i, r in tmp.iterrows():
+                if pd.isna(r.get("Profit/Loss")) or str(r.get("Profit/Loss", "")).strip() == "":
+                    tmp.at[i, "Profit/Loss"] = tracker_profit_from_american(r.get("Odds"), r.get("Stake"), r.get("Result"))
+            save_tracker_df(tmp)
+            st.success("Auto-filled available single-leg P/L values and saved.")
+    with b2:
+        if st.button("💾 Save tracker updates", type="primary", use_container_width=True):
+            save_tracker_df(edited)
+            st.success("Tracker updated.")
+    with b3:
+        st.download_button("Download tracker CSV", data=edited.to_csv(index=False), file_name="mlb_bet_tracker.csv", mime="text/csv", use_container_width=True)
+
+    st.markdown("#### Performance breakdowns")
+    tc1, tc2 = st.columns(2)
+    with tc1:
+        by_bucket = tracker.groupby("Bucket", dropna=False).agg(
+            Legs=("Team", "count"),
+            Avg_Model_Win=("Model Win %", "mean"),
+            Avg_Edge=("Edge %", "mean"),
+            Profit_Loss=("Profit/Loss", "sum"),
+            Stake=("Stake", "sum"),
+        ).reset_index()
+        if not by_bucket.empty:
+            by_bucket["ROI %"] = np.where(by_bucket["Stake"] > 0, by_bucket["Profit_Loss"] / by_bucket["Stake"] * 100, 0)
+        st.dataframe(by_bucket, use_container_width=True, hide_index=True)
+    with tc2:
+        by_ticket = tracker.groupby("Ticket Type", dropna=False).agg(
+            Legs=("Team", "count"),
+            Profit_Loss=("Profit/Loss", "sum"),
+            Stake=("Stake", "sum"),
+        ).reset_index()
+        if not by_ticket.empty:
+            by_ticket["ROI %"] = np.where(by_ticket["Stake"] > 0, by_ticket["Profit_Loss"] / by_ticket["Stake"] * 100, 0)
+        st.dataframe(by_ticket, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Miss reason breakdown")
+    miss = tracker[tracker["Miss Reason"].astype(str).str.len() > 0]
+    if miss.empty:
+        st.caption("No miss reasons logged yet.")
+    else:
+        st.dataframe(miss.groupby("Miss Reason").size().reset_index(name="Count"), use_container_width=True, hide_index=True)
+
 def main():
     st.markdown("""
     <div class='hero'>
-      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v12 three-bucket view</span></div>
-      <div class='hero-sub'>Live odds, model scoring, ticket builder, trap favorites, boosters, diagnostics, and slate warnings.</div>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v13 bet tracker</span></div>
+      <div class='hero-sub'>Live odds, winner-first model scoring, three-bucket recommendations, diagnostics, and integrated bet tracking.</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1722,7 +2134,7 @@ def main():
     grade = grade_from(qlegs, avg_edge)
 
     # Real working navigation. The buttons inside the custom image-like dashboard are labels only.
-    page = st.radio("View", ["Command Center", "Full Slate", "Ticket Builder", "Diagnostics", "Results / Export"], horizontal=True, label_visibility="collapsed")
+    page = st.radio("View", ["Command Center", "Full Slate", "Ticket Builder", "Bet Tracker", "Diagnostics", "Results / Export"], horizontal=True, label_visibility="collapsed")
 
     taken_tmp = set(best_available.head(5).index) if not best_available.empty else set()
     price_ok = (df["Odds"].notna()) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)
@@ -1794,6 +2206,8 @@ def main():
         st.subheader("Optional Boosters")
         st.caption("Display only. These are not automatically approved parlay legs.")
         st.dataframe(_display_cols(boosters_tmp, ["Team","Opponent","Odds","Book","Model Win %","Edge %","Tier","Risk"]), use_container_width=True, hide_index=True)
+    elif page == "Bet Tracker":
+        render_bet_tracker(df, qualified, full_ticket_qualified, best_available, target_date)
     elif page == "Diagnostics":
         st.subheader("API Diagnostics")
         c1,c2,c3,c4 = st.columns(4)
@@ -1811,6 +2225,11 @@ def main():
         st.subheader("Results / Export")
         st.download_button("Download today’s board CSV", data=df.to_csv(index=False), file_name=f"mlb_board_{target_date}.csv", mime="text/csv")
         st.download_button("Download suggested winner-first CSV", data=qualified.to_csv(index=False), file_name=f"suggested_legs_{target_date}.csv", mime="text/csv")
+        try:
+            tracker_export = load_tracker()
+            st.download_button("Download full bet tracker CSV", data=tracker_export.to_csv(index=False), file_name="mlb_bet_tracker.csv", mime="text/csv")
+        except Exception:
+            pass
         try:
             tracker = pd.read_csv("results_tracker.csv")
             st.dataframe(tracker, use_container_width=True, hide_index=True)
