@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 import pytz
 
 st.set_page_config(page_title="MLB Moneyline Command Center", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
-BUILD_VERSION = "v5-custom-html-command-center"
+BUILD_VERSION = "v6-working-nav-odds-first"
 
 EASTERN = pytz.timezone("America/New_York")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
@@ -751,7 +751,7 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     """
     html = f"""
     {css}<div class='cc'>
-      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center</span><span>Full Slate</span><span>Ticket Builder</span><span>Results</span><span>Settings</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>Refresh Data</div></div>
+      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v6 live view</div></div>
       <div class='grid'>
         <div class='rail'>
           <div class='label'>Today's Slate</div><div style='margin:10px 0 8px;'><span class='datebox'>{target_date.strftime('%a').upper()}<br>{target_date.strftime('%b %-d').upper()}</span><span class='games'>{meta.get('schedule_games',0)}</span></div><div class='note'>games today</div><hr style='border-color:#20384c;margin:14px 0;'>
@@ -1083,6 +1083,266 @@ def main():
         if meta.get("errors"):
             with st.expander("API errors / diagnostics"):
                 st.code("\n".join(meta["errors"][:20]))
+
+
+# -----------------------------
+# v6 overrides: odds-first fallback + real navigation pages
+# -----------------------------
+_BUILD_BOARD_SCHEDULE_FIRST = build_board
+
+def _event_is_target_date(ev: dict, day: date) -> bool:
+    try:
+        ts = ev.get("commence_time", "")
+        if not ts:
+            return True
+        dt = pd.to_datetime(ts, utc=True).tz_convert(EASTERN).date()
+        return dt == day
+    except Exception:
+        return True
+
+def _schedule_lookup(schedule: List[dict]) -> Dict[tuple, dict]:
+    out = {}
+    for game in schedule:
+        try:
+            teams = game.get("teams", {})
+            h = teams.get("home", {}).get("team", {}).get("name", "")
+            a = teams.get("away", {}).get("team", {}).get("name", "")
+            start_iso = game.get("gameDate", "")
+            out[pair_key(h, a)] = {"game": game, "start_iso": start_iso}
+        except Exception:
+            pass
+    return out
+
+def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """v6: use schedule-first model when matching works; if odds do not match schedule, build from odds directly.
+    This prevents the dashboard from showing Odds=None and zero suggested legs when the Odds API is returning valid events.
+    """
+    df, meta = _BUILD_BOARD_SCHEDULE_FIRST(day, api_key, regions, bookmakers)
+    if meta.get("matched_games", 0) > 0 or meta.get("odds_events", 0) == 0:
+        meta["build_mode"] = "schedule-first"
+        return df, meta
+
+    st.session_state["errors"] = meta.get("errors", []) + ["v6 fallback used: schedule/odds team matching failed, so board was built directly from Odds API events."]
+    odds_events = fetch_odds(api_key, regions, bookmakers)
+    odds_events = [ev for ev in odds_events if _event_is_target_date(ev, day)] or odds_events
+    schedule = fetch_schedule(day)
+    sched_map = _schedule_lookup(schedule)
+    odds_map = parse_odds_events(odds_events)
+    rows = []
+    matched_sched = 0
+
+    for key, odds_event in odds_map.items():
+        home = odds_event.get("home", "")
+        away = odds_event.get("away", "")
+        start_iso = odds_event.get("start", "")
+        sched_info = sched_map.get(pair_key(home, away), {})
+        game = sched_info.get("game", {})
+        if game:
+            matched_sched += 1
+        teams = game.get("teams", {}) if game else {}
+        home_pp = teams.get("home", {}).get("probablePitcher", {}) if game else {}
+        away_pp = teams.get("away", {}).get("probablePitcher", {}) if game else {}
+        venue = game.get("venue", {}).get("name", "") if game else ""
+        outcomes = odds_event.get("outcomes", [])
+        for team, opp, is_home, pp in [(home, away, True, home_pp), (away, home, False, away_pp)]:
+            odds, book, team_avg_imp = best_price_for_team(outcomes, team)
+            opp_odds, opp_book, opp_avg_imp = best_price_for_team(outcomes, opp)
+            implied = american_to_implied(odds) if pd.notna(odds) else np.nan
+            market_consensus = no_vig_market_prob(team_avg_imp, opp_avg_imp)
+            # Odds-first model: market consensus is anchor; best-price edge comes from comparing no-vig consensus to best available implied price.
+            home_adj = 0.012 if is_home else -0.004
+            model_pct = clamp((market_consensus if pd.notna(market_consensus) else 0.50) + home_adj, .28, .74)
+            edge_pct = (model_pct - implied) * 100 if pd.notna(implied) else np.nan
+            # Scores are intentionally market-led in fallback mode; full model resumes when schedule matching works.
+            market_points = market_edge_score(model_pct, implied) if pd.notna(implied) else 0
+            base_score = 52 + market_points + (edge_pct if pd.notna(edge_pct) else -5) * 2.2 + (4 if is_home else 0)
+            total_score = clamp(base_score, 35, 88)
+            risk_flags = []
+            if not pp: risk_flags.append("Pitcher TBD")
+            if pd.isna(odds): risk_flags.append("Odds missing")
+            if pd.notna(odds) and odds < -220: risk_flags.append("Expensive favorite")
+            if pd.notna(odds) and odds > 180: risk_flags.append("Long dog")
+            risk_flags.append("Odds-first fallback")
+            tier = tier_from(edge_pct if pd.notna(edge_pct) else -99, total_score, odds if pd.notna(odds) else 0, risk_flags)
+            # In fallback mode, allow B/Lean suggestions so user sees smaller-card candidates, but do not overlabel as A.
+            if tier == "A": tier = "B+"
+            try:
+                start_fmt = pd.to_datetime(start_iso, utc=True).tz_convert(EASTERN).strftime("%-I:%M %p")
+            except Exception:
+                start_fmt = ""
+            rows.append({
+                "Start": start_fmt,
+                "Game": f"{away} @ {home}",
+                "Team": team,
+                "Abbr": TEAM_ALIASES.get(team, team[:3].upper()),
+                "Opponent": opp,
+                "Home/Away": "Home" if is_home else "Away",
+                "Venue": venue,
+                "Odds": odds,
+                "Book": book,
+                "Implied %": implied * 100 if pd.notna(implied) else np.nan,
+                "Market %": market_consensus * 100 if pd.notna(market_consensus) else np.nan,
+                "Model Win %": model_pct * 100,
+                "Edge %": edge_pct,
+                "Score": round(total_score, 1),
+                "Tier": tier,
+                "Risk": ", ".join(risk_flags),
+                "Probable Pitcher": pp.get("fullName", "TBD") if pp else "TBD",
+                "SP Score": 15.0,
+                "Offense Score": 12.0,
+                "Bullpen Proxy": 7.5,
+                "Market Score": round(market_points, 1),
+                "Environment Score": 5.0,
+                "Notes": "Built from live odds because schedule/odds matching failed. Use as smaller-card/watchlist unless full data matches.",
+                "Temp": np.nan,
+                "Wind": np.nan,
+                "Precip %": np.nan,
+                "Park Factor": 1.0,
+            })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values(["Edge %", "Score"], ascending=[False, False])
+    meta2 = {
+        "warnings": ["Odds-first fallback mode active. Suggested legs are usable for watchlist/smaller-card review, but full pitcher/team model did not match the odds feed."],
+        "errors": st.session_state.get("errors", []),
+        "odds_events": len(odds_events),
+        "odds_outcomes": sum(len(v.get("outcomes", [])) for v in odds_map.values()),
+        "schedule_games": len(schedule),
+        "matched_games": 0,
+        "matched_schedule_in_fallback": matched_sched,
+        "build_mode": "odds-first-fallback",
+    }
+    return out, meta2
+
+def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int):
+    dfx = df.copy()
+    for col in ["Edge %", "Score", "Odds"]:
+        if col in dfx.columns:
+            dfx[col] = pd.to_numeric(dfx[col], errors="coerce")
+    price_ok = (dfx["Odds"].notna()) & (dfx["Odds"] >= max_fav) & (dfx["Odds"] <= max_dog)
+    eligible = dfx[price_ok & (dfx["Edge %"].fillna(-99) >= min_edge)].copy()
+    qualified = eligible[eligible["Tier"].isin(["A", "B+", "B", "Lean"])].copy()
+    if qualified.empty:
+        qualified = dfx[price_ok].sort_values(["Edge %", "Score"], ascending=[False, False]).head(5).copy()
+    full_ticket_qualified = qualified[qualified["Tier"].isin(["A", "B+"])].copy()
+    fallback = dfx[price_ok].sort_values(["Edge %", "Score"], ascending=[False, False]).head(10)
+    best_available = qualified if not qualified.empty else fallback
+    return eligible, qualified, full_ticket_qualified, best_available
+
+def main():
+    st.markdown("""
+    <div class='hero'>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v6 working controls</span></div>
+      <div class='hero-sub'>Live odds, model scoring, ticket builder, trap favorites, boosters, diagnostics, and slate warnings.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    today = datetime.now(EASTERN).date()
+    with st.expander("⚙️ Dashboard controls", expanded=False):
+        c1, c2, c3, c4 = st.columns([1,1,2,1])
+        with c1:
+            target_date = st.date_input("Slate date", today)
+        with c2:
+            regions = st.selectbox("Sportsbook region", ["us", "us2", "uk", "eu", "au"], index=0)
+        with c3:
+            bookmakers = st.text_input("Bookmakers filter", value="fanduel,draftkings,betmgm", placeholder="Leave blank to use all available books")
+        with c4:
+            model_mode = st.selectbox("Model strictness", ["Balanced", "Conservative", "Aggressive"], index=0)
+        c5, c6, c7, c8 = st.columns([1,1,1,1])
+        default_edge = -1.0 if model_mode == "Aggressive" else (-0.5 if model_mode == "Balanced" else 1.0)
+        with c5:
+            min_edge = st.slider("Smaller-card min edge %", -3.0, 8.0, default_edge, 0.5)
+        with c6:
+            max_fav = st.slider("Max favorite price", -300, -120, -260, 5)
+        with c7:
+            max_dog = st.slider("Max underdog price", 100, 250, 200, 5)
+        with c8:
+            refresh = st.button("🔄 Refresh odds + model", type="primary", use_container_width=True)
+        try:
+            api_key = st.secrets.get("ODDS_API_KEY", "")
+        except Exception:
+            api_key = os.environ.get("ODDS_API_KEY", "")
+        if not api_key:
+            api_key = st.text_input("Odds API key", type="password")
+        st.caption("If no odds appear, open the Diagnostics page below. v6 will show odds counts and fallback status without hiding it in an expander.")
+    if 'target_date' not in locals():
+        target_date=today; regions='us'; bookmakers='fanduel,draftkings,betmgm'; model_mode='Balanced'; min_edge=-0.5; max_fav=-260; max_dog=200; refresh=False
+        try:
+            api_key=st.secrets.get("ODDS_API_KEY", "")
+        except Exception:
+            api_key=os.environ.get("ODDS_API_KEY", "")
+    if not api_key:
+        st.warning("Add ODDS_API_KEY in Streamlit secrets or paste it in Dashboard controls.")
+        st.stop()
+    if refresh:
+        fetch_odds.clear(); fetch_schedule.clear(); fetch_team_stats.clear(); fetch_pitcher_stats.clear(); fetch_weather.clear()
+    with st.spinner("Loading live odds, slate, pitchers, stats, and weather..."):
+        df, meta = build_board(target_date, api_key, regions, bookmakers)
+    if df.empty:
+        st.error("No slate or odds data loaded. Open Diagnostics for details.")
+        st.json(meta)
+        st.stop()
+
+    eligible, qualified, full_ticket_qualified, best_available = _qualification(df, min_edge, max_fav, max_dog)
+    tier_a = int((full_ticket_qualified["Tier"] == "A").sum()) if not full_ticket_qualified.empty else 0
+    tier_bp = int((full_ticket_qualified["Tier"] == "B+").sum()) if not full_ticket_qualified.empty else 0
+    qlegs = len(qualified)
+    avg_edge = qualified["Edge %"].mean() if qlegs and "Edge %" in qualified else 0
+    status, play_type = slate_status(qlegs, tier_a, tier_bp)
+    if len(full_ticket_qualified) < 5 and not best_available.empty:
+        if qlegs >= 3:
+            status = "SMALLER CARD"; play_type = f"{min(qlegs,4)}-leg / singles"
+        else:
+            status = "WATCHLIST ONLY"; play_type = "No full card"
+    grade = grade_from(qlegs, avg_edge)
+
+    # Real working navigation. The buttons inside the custom image-like dashboard are labels only.
+    page = st.radio("View", ["Command Center", "Full Slate", "Ticket Builder", "Diagnostics", "Results / Export"], horizontal=True, label_visibility="collapsed")
+
+    taken_tmp = set(best_available.head(5).index) if not best_available.empty else set()
+    price_ok = (df["Odds"].notna()) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)
+    boosters_tmp = df[price_ok & (~df.index.isin(taken_tmp))].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
+    traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"].fillna(-99) < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
+
+    diag_line = f"Build mode: {meta.get('build_mode','?')} | Odds events: {meta.get('odds_events',0)} | Outcomes: {meta.get('odds_outcomes',0)} | Matched games: {meta.get('matched_games',0)}"
+    st.caption(diag_line)
+
+    if page == "Command Center":
+        render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
+        st.info("Navigation and refresh controls are the real Streamlit controls above. The dashboard header is a visual snapshot so it can match the mockup more closely.")
+    elif page == "Full Slate":
+        st.subheader("Full Slate Board")
+        st.dataframe(_display_cols(df, ["Start","Game","Team","Opponent","Home/Away","Odds","Book","Market %","Model Win %","Implied %","Edge %","Score","Tier","Risk","Probable Pitcher","Notes"]), use_container_width=True, hide_index=True)
+    elif page == "Ticket Builder":
+        st.subheader("Suggested Legs")
+        st.dataframe(_display_cols(best_available, ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk","Probable Pitcher"]), use_container_width=True, hide_index=True)
+        st.subheader("Auto Ticket Builder")
+        ticket_source = eligible if not eligible.empty else best_available
+        st.dataframe(recommended_tickets(ticket_source if not ticket_source.empty else df), use_container_width=True, hide_index=True)
+        st.subheader("Optional Boosters")
+        st.dataframe(_display_cols(boosters_tmp, ["Team","Opponent","Odds","Book","Model Win %","Edge %","Tier","Risk"]), use_container_width=True, hide_index=True)
+    elif page == "Diagnostics":
+        st.subheader("API Diagnostics")
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Build mode", meta.get("build_mode","?"))
+        c2.metric("Odds events", meta.get("odds_events",0))
+        c3.metric("Odds outcomes", meta.get("odds_outcomes",0))
+        c4.metric("Matched games", meta.get("matched_games",0))
+        st.json(meta)
+        if meta.get("errors"):
+            st.code("\n".join(meta["errors"][:30]))
+        st.subheader("Rows with missing odds")
+        missing = df[df["Odds"].isna()] if "Odds" in df else pd.DataFrame()
+        st.dataframe(_display_cols(missing, ["Game","Team","Opponent","Risk","Probable Pitcher"]), use_container_width=True, hide_index=True)
+    else:
+        st.subheader("Results / Export")
+        st.download_button("Download today’s board CSV", data=df.to_csv(index=False), file_name=f"mlb_board_{target_date}.csv", mime="text/csv")
+        st.download_button("Download suggested legs CSV", data=qualified.to_csv(index=False), file_name=f"suggested_legs_{target_date}.csv", mime="text/csv")
+        try:
+            tracker = pd.read_csv("results_tracker.csv")
+            st.dataframe(tracker, use_container_width=True, hide_index=True)
+        except Exception:
+            st.info("No tracker file found yet.")
 
 
 if __name__ == "__main__":

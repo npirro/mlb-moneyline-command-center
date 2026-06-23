@@ -1,36 +1,16 @@
-# MLB Moneyline Parlay Command Center v5
+# MLB Moneyline Command Center v6
 
-This version fixes two issues from v4:
+## Fixes in v6
+- Adds real working navigation with Streamlit controls: Command Center, Full Slate, Ticket Builder, Diagnostics, Results / Export.
+- Keeps the mockup-style dashboard as a visual Command Center snapshot.
+- Adds visible diagnostics instead of hiding them in an expander.
+- Adds odds-first fallback mode. If MLB schedule/team matching fails, the app builds the board directly from The Odds API events so odds do not show as `None`.
+- Adds a visible v6 marker in the header.
 
-1. **Visual layout**: the main Command Center is now rendered as a custom HTML/CSS dashboard inside Streamlit, so it looks much closer to the original dark mockup instead of normal Streamlit cards and white tables.
-2. **Odds matching**: team matching is normalized, and the app retries The Odds API without a bookmaker filter if the selected books return zero odds. This should fix the issue where every team showed `Odds: None`.
+## Deploy
+Replace the old files in your GitHub repo with these files, commit changes, then reboot the Streamlit app.
 
-## Files
-
-- `app.py` — Streamlit app
-- `requirements.txt` — Python dependencies
-- `park_data.csv` — stadium coordinates/park factors
-- `results_tracker.csv` — results tracker template
-
-## Deploy update
-
-Upload these files into the same GitHub repo location as your current `app.py` and commit changes. Then reboot the Streamlit app.
-
-You do not need to redo your Streamlit secrets. Keep:
-
+Required Streamlit secret:
 ```toml
 ODDS_API_KEY = "your_key_here"
 ```
-
-## First thing to check after deploy
-
-Open the app and expand **Advanced views → API Diagnostics** only if the dashboard still has no odds.
-
-Look for:
-
-- `odds_events`
-- `odds_outcomes`
-- `matched_games`
-
-If `odds_outcomes` is 0, The Odds API is not returning odds for your API key/date/region.
-If `odds_outcomes` is positive but `matched_games` is 0, team matching is the issue.
