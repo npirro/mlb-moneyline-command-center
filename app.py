@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 import pytz
 
 st.set_page_config(page_title="MLB Moneyline Command Center", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
-BUILD_VERSION = "v6-working-nav-odds-first"
+BUILD_VERSION = "v7-odds-first-suggestions"
 
 EASTERN = pytz.timezone("America/New_York")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
@@ -1229,10 +1229,255 @@ def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int
     best_available = qualified if not qualified.empty else fallback
     return eligible, qualified, full_ticket_qualified, best_available
 
+
+# -----------------------------
+# v7 overrides: odds-first board + real suggested legs
+# -----------------------------
+@st.cache_data(ttl=240)
+def fetch_odds(api_key: str, regions: str, bookmakers: str) -> List[dict]:
+    """v7: transparent Odds API fetch with exact diagnostics and no forced bookmaker filter."""
+    st.session_state["odds_api_debug"] = {}
+    params = {
+        "apiKey": api_key,
+        "regions": regions or "us",
+        "markets": "h2h",
+        "oddsFormat": "american",
+        "dateFormat": "iso",
+    }
+    if str(bookmakers or "").strip():
+        params["bookmakers"] = str(bookmakers).strip()
+    try:
+        r = requests.get(ODDS_API_BASE, params=params, timeout=20)
+        st.session_state["odds_api_debug"] = {
+            "status_code": r.status_code,
+            "url_without_key": r.url.replace(api_key, "***") if api_key else r.url,
+            "response_preview": r.text[:700],
+            "bookmaker_filter_used": params.get("bookmakers", "ALL AVAILABLE"),
+        }
+        if r.status_code != 200:
+            st.session_state.setdefault("errors", []).append(f"Odds API HTTP {r.status_code}: {r.text[:500]}")
+            return []
+        data = r.json()
+        events = data if isinstance(data, list) else []
+        # If a bookmaker filter was used and no outcomes came back, retry all books.
+        def outcome_count(evs):
+            total = 0
+            for ev in evs or []:
+                for b in ev.get("bookmakers", []):
+                    for m in b.get("markets", []):
+                        if m.get("key") == "h2h":
+                            total += len(m.get("outcomes", []))
+            return total
+        if params.get("bookmakers") and outcome_count(events) == 0:
+            st.session_state.setdefault("errors", []).append("Bookmaker filter returned zero outcomes. Retried with all available books.")
+            params.pop("bookmakers", None)
+            r2 = requests.get(ODDS_API_BASE, params=params, timeout=20)
+            st.session_state["odds_api_debug_retry"] = {
+                "status_code": r2.status_code,
+                "url_without_key": r2.url.replace(api_key, "***") if api_key else r2.url,
+                "response_preview": r2.text[:700],
+            }
+            if r2.status_code == 200:
+                data2 = r2.json()
+                events = data2 if isinstance(data2, list) else events
+            else:
+                st.session_state.setdefault("errors", []).append(f"Odds API retry HTTP {r2.status_code}: {r2.text[:500]}")
+        return events
+    except Exception as e:
+        st.session_state.setdefault("errors", []).append(f"Odds API request failed: {e}")
+        st.session_state["odds_api_debug"] = {"exception": str(e)}
+        return []
+
+
+def _extract_best_prices_for_event(ev: dict) -> Dict[str, dict]:
+    rows_by_team = {}
+    for book in ev.get("bookmakers", []) or []:
+        book_title = book.get("title") or book.get("key") or ""
+        for market in book.get("markets", []) or []:
+            if market.get("key") != "h2h":
+                continue
+            for out in market.get("outcomes", []) or []:
+                nm = out.get("name")
+                price = out.get("price")
+                if nm is None or price is None:
+                    continue
+                key = norm_team_name(nm)
+                rows_by_team.setdefault(key, {"team_name": nm, "prices": []})
+                rows_by_team[key]["prices"].append({"price": price, "book": book_title})
+    best = {}
+    for key, val in rows_by_team.items():
+        prices = val["prices"]
+        if not prices:
+            continue
+        b = sorted(prices, key=lambda x: x["price"], reverse=True)[0]
+        imps = [american_to_implied(x["price"]) for x in prices if x.get("price") is not None]
+        best[key] = {
+            "team_name": val["team_name"],
+            "odds": b["price"],
+            "book": b["book"],
+            "avg_implied": float(np.mean(imps)) if imps else np.nan,
+            "book_count": len(prices),
+        }
+    return best
+
+
+def _sched_by_pair(day: date) -> Dict[tuple, dict]:
+    sched = fetch_schedule(day)
+    out = {}
+    for game in sched:
+        try:
+            teams = game.get("teams", {})
+            h = teams.get("home", {}).get("team", {}).get("name", "")
+            a = teams.get("away", {}).get("team", {}).get("name", "")
+            out[pair_key(h, a)] = game
+        except Exception:
+            pass
+    return out
+
+
+def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """v7: odds-first. If live odds exist, build the betting board from the odds feed, then enrich with MLB schedule.
+    This prevents the dashboard from showing 15 games with Odds=None when the odds feed name matching fails.
+    """
+    st.session_state["errors"] = []
+    odds_events = fetch_odds(api_key, regions, bookmakers)
+    odds_events = [ev for ev in odds_events if _event_is_target_date(ev, day)] or odds_events
+    schedule_map = _sched_by_pair(day)
+    rows = []
+    matched_schedule = 0
+    outcomes_total = 0
+    for ev in odds_events:
+        home = ev.get("home_team", "")
+        away = ev.get("away_team", "")
+        start_iso = ev.get("commence_time", "")
+        if not home or not away:
+            continue
+        best = _extract_best_prices_for_event(ev)
+        outcomes_total += sum(v.get("book_count",0) for v in best.values())
+        game = schedule_map.get(pair_key(home, away), {})
+        if game:
+            matched_schedule += 1
+        teams = game.get("teams", {}) if game else {}
+        home_pp = teams.get("home", {}).get("probablePitcher", {}) if game else {}
+        away_pp = teams.get("away", {}).get("probablePitcher", {}) if game else {}
+        home_rec = teams.get("home", {}).get("leagueRecord", {}) if game else {}
+        away_rec = teams.get("away", {}).get("leagueRecord", {}) if game else {}
+        venue = game.get("venue", {}).get("name", "") if game else ""
+        hkey, akey = norm_team_name(home), norm_team_name(away)
+        h = best.get(hkey, {})
+        a = best.get(akey, {})
+        # If names differ, fuzzy fallback by containment.
+        if not h:
+            h = next((v for k,v in best.items() if hkey in k or k in hkey), {})
+        if not a:
+            a = next((v for k,v in best.items() if akey in k or k in akey), {})
+        for team, opp, is_home, this, other, pp, rec, opp_rec in [
+            (home, away, True, h, a, home_pp, home_rec, away_rec),
+            (away, home, False, a, h, away_pp, away_rec, home_rec),
+        ]:
+            odds = this.get("odds", np.nan)
+            book = this.get("book", "")
+            team_avg_imp = this.get("avg_implied", np.nan)
+            opp_avg_imp = other.get("avg_implied", np.nan)
+            implied = american_to_implied(odds) if pd.notna(odds) else np.nan
+            market_pct = no_vig_market_prob(team_avg_imp, opp_avg_imp)
+            rec_edge = (norm_pct(rec.get("pct"), .5) - norm_pct(opp_rec.get("pct"), .5)) * 0.035
+            home_edge = 0.012 if is_home else -0.004
+            # Market-led model, with tiny record/home adjustment when schedule exists.
+            model_pct = clamp((market_pct if pd.notna(market_pct) else .50) + rec_edge + home_edge, .28, .74)
+            edge_pct = (model_pct - implied) * 100 if pd.notna(implied) else np.nan
+            market_points = market_edge_score(model_pct, implied) if pd.notna(implied) else 0
+            score = clamp(55 + market_points + (edge_pct if pd.notna(edge_pct) else -4)*2.8 + (3 if is_home else 0), 35, 90)
+            risk_flags = []
+            if not pp: risk_flags.append("Pitcher TBD")
+            if pd.isna(odds): risk_flags.append("Odds missing")
+            if pd.notna(odds) and odds < -260: risk_flags.append("Very expensive favorite")
+            elif pd.notna(odds) and odds < -220: risk_flags.append("Expensive favorite")
+            if pd.notna(odds) and odds > 200: risk_flags.append("Long dog")
+            if not game: risk_flags.append("Odds-only")
+            tier = tier_from(edge_pct if pd.notna(edge_pct) else -99, score, odds if pd.notna(odds) else 0, risk_flags)
+            # Do not overstate confidence in odds-first mode.
+            if tier == "A" and not game:
+                tier = "B+"
+            if pd.notna(odds) and tier == "No Bet" and score >= 54:
+                tier = "Lean"  # makes sure suggested/watchlist legs still appear with prices
+            try:
+                start_fmt = pd.to_datetime(start_iso, utc=True).tz_convert(EASTERN).strftime("%-I:%M %p")
+            except Exception:
+                start_fmt = ""
+            rows.append({
+                "Start": start_fmt,
+                "Game": f"{away} @ {home}",
+                "Team": team,
+                "Abbr": TEAM_ALIASES.get(team, team[:3].upper()),
+                "Opponent": opp,
+                "Home/Away": "Home" if is_home else "Away",
+                "Venue": venue,
+                "Odds": odds,
+                "Book": book,
+                "Implied %": implied * 100 if pd.notna(implied) else np.nan,
+                "Market %": market_pct * 100 if pd.notna(market_pct) else np.nan,
+                "Model Win %": model_pct * 100,
+                "Edge %": edge_pct,
+                "Score": round(score, 1),
+                "Tier": tier,
+                "Risk": ", ".join(risk_flags) if risk_flags else "Clean",
+                "Probable Pitcher": pp.get("fullName", "TBD") if pp else "TBD",
+                "SP Score": 15.0,
+                "Offense Score": 12.5,
+                "Bullpen Proxy": 7.5,
+                "Market Score": round(market_points, 1),
+                "Environment Score": 6.0,
+                "Notes": "v7 odds-first model. Use Tier A/B+ for stronger legs; Lean/B are smaller-card/watchlist candidates.",
+                "Temp": np.nan,
+                "Wind": np.nan,
+                "Precip %": np.nan,
+                "Park Factor": 1.0,
+            })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        # If the odds API is not returning data, show schedule-only diagnostics rather than fake betting legs.
+        df, meta = _BUILD_BOARD_SCHEDULE_FIRST(day, api_key, regions, bookmakers)
+        meta["build_mode"] = "schedule-only-no-odds"
+        meta["odds_api_debug"] = st.session_state.get("odds_api_debug", {})
+        meta["odds_api_debug_retry"] = st.session_state.get("odds_api_debug_retry", {})
+        return df, meta
+    df = df.sort_values(["Edge %", "Score"], ascending=[False, False])
+    meta = {
+        "warnings": ["v7 odds-first mode active. This prioritizes usable live odds and suggested legs. Pitcher/team stat enrichment appears when MLB schedule matches the odds event."],
+        "errors": st.session_state.get("errors", []),
+        "odds_events": len(odds_events),
+        "odds_outcomes": outcomes_total,
+        "schedule_games": len(schedule_map),
+        "matched_games": matched_schedule,
+        "build_mode": "v7-odds-first",
+        "odds_api_debug": st.session_state.get("odds_api_debug", {}),
+        "odds_api_debug_retry": st.session_state.get("odds_api_debug_retry", {}),
+    }
+    return df, meta
+
+
+def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int):
+    dfx = df.copy()
+    for col in ["Edge %", "Score", "Odds", "Model Win %"]:
+        if col in dfx.columns:
+            dfx[col] = pd.to_numeric(dfx[col], errors="coerce")
+    price_ok = (dfx["Odds"].notna()) & (dfx["Odds"] >= max_fav) & (dfx["Odds"] <= max_dog)
+    # Eligible = legs that can actually be placed and are not too ugly on price/model.
+    eligible = dfx[price_ok & (dfx["Model Win %"].fillna(0) >= 45)].copy()
+    # Suggested legs are intentionally broader than full-ticket legs.
+    qualified = eligible[(eligible["Edge %"].fillna(-99) >= min_edge) | (eligible["Score"].fillna(0) >= 55)].copy()
+    if qualified.empty:
+        qualified = eligible.sort_values(["Edge %", "Score"], ascending=[False, False]).head(5).copy()
+    # Full 5-leg qualification remains stricter.
+    full_ticket_qualified = eligible[eligible["Tier"].isin(["A", "B+"]) & (eligible["Edge %"].fillna(-99) >= max(0.0, min_edge))].copy()
+    best_available = qualified.sort_values(["Edge %", "Score"], ascending=[False, False]).head(10) if not qualified.empty else eligible.sort_values(["Edge %", "Score"], ascending=[False, False]).head(10)
+    return eligible, qualified, full_ticket_qualified, best_available
+
 def main():
     st.markdown("""
     <div class='hero'>
-      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v6 working controls</span></div>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v7 odds-first suggestions</span></div>
       <div class='hero-sub'>Live odds, model scoring, ticket builder, trap favorites, boosters, diagnostics, and slate warnings.</div>
     </div>
     """, unsafe_allow_html=True)
@@ -1245,7 +1490,7 @@ def main():
         with c2:
             regions = st.selectbox("Sportsbook region", ["us", "us2", "uk", "eu", "au"], index=0)
         with c3:
-            bookmakers = st.text_input("Bookmakers filter", value="fanduel,draftkings,betmgm", placeholder="Leave blank to use all available books")
+            bookmakers = st.text_input("Bookmakers filter", value="", placeholder="Leave blank to use all available books")
         with c4:
             model_mode = st.selectbox("Model strictness", ["Balanced", "Conservative", "Aggressive"], index=0)
         c5, c6, c7, c8 = st.columns([1,1,1,1])
@@ -1266,7 +1511,7 @@ def main():
             api_key = st.text_input("Odds API key", type="password")
         st.caption("If no odds appear, open the Diagnostics page below. v6 will show odds counts and fallback status without hiding it in an expander.")
     if 'target_date' not in locals():
-        target_date=today; regions='us'; bookmakers='fanduel,draftkings,betmgm'; model_mode='Balanced'; min_edge=-0.5; max_fav=-260; max_dog=200; refresh=False
+        target_date=today; regions='us'; bookmakers=''; model_mode='Balanced'; min_edge=-0.5; max_fav=-260; max_dog=200; refresh=False
         try:
             api_key=st.secrets.get("ODDS_API_KEY", "")
         except Exception:
