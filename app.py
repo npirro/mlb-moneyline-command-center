@@ -756,7 +756,7 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     """
     html = f"""
     {css}<div class='cc'>
-      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v11 winner-first + no-dupe games</div></div>
+      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v12 three-bucket view</div></div>
       <div class='grid'>
         <div class='rail'>
           <div class='label'>Today's Slate</div><div style='margin:10px 0 8px;'><span class='datebox'>{target_date.strftime('%a').upper()}<br>{target_date.strftime('%b %-d').upper()}</span><span class='games'>{meta.get('schedule_games',0)}</span></div><div class='note'>games today</div><hr style='border-color:#20384c;margin:14px 0;'>
@@ -916,7 +916,7 @@ def main():
     boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
     traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
     render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
-    st.caption("v11 winner-first + no-dupe games: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
+    st.caption("v12 three-bucket view: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
 
     with st.expander("Advanced views: full slate, ticket builder, diagnostics", expanded=False):
         st.subheader("Full Slate Board")
@@ -927,7 +927,7 @@ def main():
         st.dataframe(ticket_df, use_container_width=True, hide_index=True)
         st.subheader("Export")
         st.download_button("Download today’s board CSV", data=df.to_csv(index=False), file_name=f"mlb_board_{target_date}.csv", mime="text/csv")
-        st.download_button("Download suggested legs CSV", data=qualified.to_csv(index=False), file_name=f"suggested_legs_{target_date}.csv", mime="text/csv")
+        st.download_button("Download suggested winner-first CSV", data=qualified.to_csv(index=False), file_name=f"suggested_legs_{target_date}.csv", mime="text/csv")
         st.subheader("API Diagnostics")
         st.json(meta)
         if meta.get("errors"):
@@ -1657,7 +1657,7 @@ def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int
 def main():
     st.markdown("""
     <div class='hero'>
-      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v11 winner-first + no-dupe games</span></div>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v12 three-bucket view</span></div>
       <div class='hero-sub'>Live odds, model scoring, ticket builder, trap favorites, boosters, diagnostics, and slate warnings.</div>
     </div>
     """, unsafe_allow_html=True)
@@ -1735,16 +1735,64 @@ def main():
     if page == "Command Center":
         render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
         st.info("Navigation and refresh controls are the real Streamlit controls above. The dashboard header is a visual snapshot so it can match the mockup more closely.")
+        st.markdown("### Three-Bucket Recommendation View")
+        b1, b2, b3 = st.tabs(["Core Parlay Legs", "Suggested Winner-First", "Watchlist / Value Dogs"])
+        with b1:
+            if full_ticket_qualified.empty:
+                st.warning("No Core Parlay legs. No official 5-leg ticket is supported right now.")
+            else:
+                st.dataframe(_display_cols(full_ticket_qualified, ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk"]), use_container_width=True, hide_index=True)
+        with b2:
+            if qualified.empty:
+                st.info("No Suggested Winner-First legs right now.")
+            else:
+                st.dataframe(_display_cols(qualified, ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk"]), use_container_width=True, hide_index=True)
+        with b3:
+            watch_source = best_available.copy() if not best_available.empty else pd.DataFrame()
+            if not qualified.empty and not watch_source.empty:
+                watch_source = watch_source[~watch_source.index.isin(qualified.index)]
+            if watch_source.empty:
+                price_ok_watch = (df["Odds"].notna()) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)
+                watch_source = df[price_ok_watch].sort_values(["Model Win %","Edge %","Score"], ascending=[False, False, False]).head(8)
+            st.dataframe(_display_cols(watch_source, ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk"]), use_container_width=True, hide_index=True)
     elif page == "Full Slate":
         st.subheader("Full Slate Board")
         st.dataframe(_display_cols(df, ["Start","Game","Team","Opponent","Home/Away","Odds","Book","Market %","Model Win %","Implied %","Edge %","Score","Tier","Risk","Probable Pitcher","Notes"]), use_container_width=True, hide_index=True)
     elif page == "Ticket Builder":
-        st.subheader("Suggested Legs")
-        st.dataframe(_display_cols(best_available, ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk","Probable Pitcher"]), use_container_width=True, hide_index=True)
+        st.subheader("Bucket 1 — Core Parlay Legs")
+        st.caption("Strictest list. These are the only legs that can support a serious 5-leg ticket. Requires stronger win probability, edge, score, and one side per game.")
+        core_view = full_ticket_qualified if not full_ticket_qualified.empty else pd.DataFrame()
+        if core_view.empty:
+            st.warning("No Core Parlay legs right now. That means no official 5-leg ticket is supported.")
+        else:
+            st.dataframe(_display_cols(core_view, ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk","Probable Pitcher"]), use_container_width=True, hide_index=True)
+
+        st.subheader("Bucket 2 — Suggested Winner-First Legs")
+        st.caption("Usable for singles, 2-leg, 3-leg, or smaller-card testing. These prioritize teams the model thinks can actually win, then check the price.")
+        if qualified.empty:
+            st.info("No Suggested Winner-First legs right now.")
+        else:
+            st.dataframe(_display_cols(qualified, ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk","Probable Pitcher"]), use_container_width=True, hide_index=True)
+
+        st.subheader("Bucket 3 — Watchlist / Value Dogs / Near Misses")
+        st.caption("These are not official parlay legs. They may have value, be close to qualifying, or be useful for paper tracking only.")
+        watch_source = best_available.copy() if not best_available.empty else pd.DataFrame()
+        if not qualified.empty and not watch_source.empty:
+            watch_source = watch_source[~watch_source.index.isin(qualified.index)]
+        if watch_source.empty:
+            price_ok_watch = (df["Odds"].notna()) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)
+            watch_source = df[price_ok_watch].sort_values(["Model Win %","Edge %","Score"], ascending=[False, False, False]).head(8)
+        st.dataframe(_display_cols(watch_source, ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk","Probable Pitcher"]), use_container_width=True, hide_index=True)
+
         st.subheader("Auto Ticket Builder")
-        ticket_source = eligible if not eligible.empty else best_available
-        st.dataframe(recommended_tickets(ticket_source if not ticket_source.empty else df), use_container_width=True, hide_index=True)
+        ticket_source = qualified if not qualified.empty else pd.DataFrame()
+        if ticket_source.empty:
+            st.warning("No official suggested legs available, so no system ticket should be built right now.")
+        else:
+            st.dataframe(recommended_tickets(ticket_source), use_container_width=True, hide_index=True)
+
         st.subheader("Optional Boosters")
+        st.caption("Display only. These are not automatically approved parlay legs.")
         st.dataframe(_display_cols(boosters_tmp, ["Team","Opponent","Odds","Book","Model Win %","Edge %","Tier","Risk"]), use_container_width=True, hide_index=True)
     elif page == "Diagnostics":
         st.subheader("API Diagnostics")
@@ -1762,7 +1810,7 @@ def main():
     else:
         st.subheader("Results / Export")
         st.download_button("Download today’s board CSV", data=df.to_csv(index=False), file_name=f"mlb_board_{target_date}.csv", mime="text/csv")
-        st.download_button("Download suggested legs CSV", data=qualified.to_csv(index=False), file_name=f"suggested_legs_{target_date}.csv", mime="text/csv")
+        st.download_button("Download suggested winner-first CSV", data=qualified.to_csv(index=False), file_name=f"suggested_legs_{target_date}.csv", mime="text/csv")
         try:
             tracker = pd.read_csv("results_tracker.csv")
             st.dataframe(tracker, use_container_width=True, hide_index=True)
