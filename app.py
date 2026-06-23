@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 import pytz
 
 st.set_page_config(page_title="MLB Moneyline Command Center", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
-BUILD_VERSION = "v7-odds-first-suggestions"
+BUILD_VERSION = "v8-tightened-thresholds"
 
 EASTERN = pytz.timezone("America/New_York")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
@@ -406,24 +406,29 @@ def market_edge_score(model_pct: float, implied_pct: float) -> float:
 
 
 def tier_from(edge_pct: float, score: float, odds: float, risk_flags: List[str]) -> str:
-    # v4: separate "not a full-ticket leg" from "nothing useful".
-    # MLB moneyline edges are often small because the market is efficient; the dashboard should still surface usable smaller-card legs.
+    # v8 tightened rules:
+    # Tiny positive edges are NOT recommended plays. They are only watchlist/entertainment candidates.
+    # Suggested legs require at least ~2% model edge plus a reasonable score.
     if "Game started" in risk_flags:
         return "No Bet"
     if odds < -280 or odds > 220:
-        if score >= 78 and edge_pct >= 2.5:
+        if score >= 82 and edge_pct >= 5.0:
             return "B+"
-        if score >= 66 and edge_pct >= -0.5:
+        if score >= 70 and edge_pct >= 1.0:
             return "Lean"
+        if score >= 62 and edge_pct >= 0.0:
+            return "Thin Edge"
         return "No Bet"
-    if edge_pct >= 3.0 and score >= 72:
+    if edge_pct >= 5.0 and score >= 72:
         return "A"
-    if edge_pct >= 1.0 and score >= 65:
+    if edge_pct >= 3.0 and score >= 68:
         return "B+"
-    if edge_pct >= -0.5 and score >= 60:
+    if edge_pct >= 2.0 and score >= 64:
         return "B"
-    if score >= 64 and edge_pct >= -2.5:
+    if edge_pct >= 1.0 and score >= 60:
         return "Lean"
+    if edge_pct >= 0.0 and score >= 55:
+        return "Thin Edge"
     return "No Bet"
 
 
@@ -655,7 +660,7 @@ def recommended_tickets(qdf: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     core = qdf.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).copy()
     # Custom ranking: A > B+ > B > Lean
-    rankmap = {"A": 0, "B+": 1, "B": 2, "Lean": 3}
+    rankmap = {"A": 0, "B+": 1, "B": 2, "Lean": 3, "Thin Edge": 4}
     core["tier_rank"] = core["Tier"].map(rankmap).fillna(9)
     core = core.sort_values(["tier_rank", "Edge %", "Score"], ascending=[True, False, False])
     rows = []
@@ -679,7 +684,7 @@ def _display_cols(df, cols):
 
 
 def _tier_color(t):
-    return {"A":"good","B+":"warn","B":"warn","Lean":"info","No Bet":"bad"}.get(str(t), "info")
+    return {"A":"good","B+":"warn","B":"warn","Lean":"info","Thin Edge":"info","No Bet":"bad"}.get(str(t), "info")
 
 def _odds_html(o):
     txt = format_odds(o)
@@ -751,7 +756,7 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     """
     html = f"""
     {css}<div class='cc'>
-      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v6 live view</div></div>
+      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v8 tightened model</div></div>
       <div class='grid'>
         <div class='rail'>
           <div class='label'>Today's Slate</div><div style='margin:10px 0 8px;'><span class='datebox'>{target_date.strftime('%a').upper()}<br>{target_date.strftime('%b %-d').upper()}</span><span class='games'>{meta.get('schedule_games',0)}</span></div><div class='note'>games today</div><hr style='border-color:#20384c;margin:14px 0;'>
@@ -800,14 +805,14 @@ def main():
         with c2:
             regions = st.selectbox("Sportsbook region", ["us", "us2", "uk", "eu", "au"], index=0)
         with c3:
-            bookmakers = st.text_input("Bookmakers filter", value="fanduel,draftkings,betmgm", placeholder="fanduel,draftkings,betmgm")
+            bookmakers = st.text_input("Bookmakers filter", value="", placeholder="Leave blank for all available books")
         with c4:
             model_mode = st.selectbox("Model strictness", ["Balanced", "Conservative", "Aggressive"], index=0)
 
         c5, c6, c7, c8 = st.columns([1,1,1,1])
-        default_edge = -1.0 if model_mode == "Aggressive" else (-0.5 if model_mode == "Balanced" else 1.0)
+        default_edge = 1.5 if model_mode == "Aggressive" else (2.0 if model_mode == "Balanced" else 3.0)
         with c5:
-            min_edge = st.slider("Core/smaller-card min edge %", -3.0, 8.0, default_edge, 0.5)
+            min_edge = st.slider("Suggested-leg minimum edge %", 0.0, 8.0, default_edge, 0.5)
         with c6:
             max_fav = st.slider("Max favorite price", -300, -120, -260, 5)
         with c7:
@@ -826,7 +831,7 @@ def main():
 
     # Defaults when controls are closed after first render.
     if 'target_date' not in locals():
-        target_date = datetime.now(EASTERN).date(); regions='us'; bookmakers='fanduel,draftkings,betmgm'; model_mode='Balanced'; min_edge=-0.5; max_fav=-260; max_dog=200; refresh=False
+        target_date = datetime.now(EASTERN).date(); regions='us'; bookmakers=''; model_mode='Balanced'; min_edge=2.0; max_fav=-260; max_dog=200; refresh=False
         try:
             api_key = st.secrets.get("ODDS_API_KEY", "")
         except Exception:
@@ -848,18 +853,16 @@ def main():
             st.code("\n".join(meta["errors"][:10]))
         st.stop()
 
-    # Qualification logic. This still protects the full-ticket recommendation, but never leaves the screen empty.
-    # v4 qualification logic:
-    # qualified = legs the app is willing to suggest for singles/smaller cards.
-    # full_ticket_qualified = stronger A/B+ legs used to decide whether a 5-leg moonshot is recommended.
-    eligible = df[(df["Edge %"] >= min_edge) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog) & (df["Tier"].isin(["A", "B+", "B", "Lean"]))].copy()
-    qualified = eligible[eligible["Tier"].isin(["A", "B+", "B"])].copy()
-    if qualified.empty:
-        qualified = eligible.sort_values(["Score", "Edge %"], ascending=[False, False]).head(3).copy()
+    # v8 tightened qualification logic.
+    # Suggested legs require a real edge. Thin edges still appear as watchlist only, never as a recommended ticket.
+    price_ok = (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)
+    eligible = df[price_ok & (df["Edge %"] >= min_edge) & (df["Tier"].isin(["A", "B+", "B"]))].copy()
+    qualified = eligible.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).copy()
     full_ticket_qualified = qualified[qualified["Tier"].isin(["A", "B+"])].copy()
-    watchlist = df[(df["Edge %"] > -3.0) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog) & (df["Tier"].isin(["A", "B+", "B", "Lean", "No Bet"]))].copy()
+
+    watchlist = df[price_ok & (df["Edge %"] >= 0.0) & (df["Tier"].isin(["Lean", "Thin Edge", "B", "B+", "A"]))].copy()
     watchlist = watchlist.sort_values(["Edge %", "Score"], ascending=[False, False]).head(10)
-    fallback = df.sort_values(["Score", "Edge %"], ascending=[False, False]).head(10)
+    fallback = df[price_ok].sort_values(["Score", "Edge %"], ascending=[False, False]).head(10)
     best_available = qualified if not qualified.empty else (watchlist if not watchlist.empty else fallback)
 
     tier_a = int((full_ticket_qualified["Tier"] == "A").sum()) if "full_ticket_qualified" in locals() and not full_ticket_qualified.empty else 0
@@ -873,7 +876,7 @@ def main():
             play_type = f"{min(qlegs,4)}-leg / singles"
         else:
             status = "WATCHLIST ONLY"
-            play_type = "No full card"
+            play_type = "No official play"
     grade = grade_from(qlegs, avg_edge)
 
     # v5 primary render: custom HTML command center first, not native Streamlit tabs.
@@ -881,6 +884,7 @@ def main():
     boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
     traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
     render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
+    st.caption("v8 tightened model: Suggested legs require at least the selected minimum edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
 
     with st.expander("Advanced views: full slate, ticket builder, diagnostics", expanded=False):
         st.subheader("Full Slate Board")
@@ -1494,7 +1498,7 @@ def main():
         with c4:
             model_mode = st.selectbox("Model strictness", ["Balanced", "Conservative", "Aggressive"], index=0)
         c5, c6, c7, c8 = st.columns([1,1,1,1])
-        default_edge = -1.0 if model_mode == "Aggressive" else (-0.5 if model_mode == "Balanced" else 1.0)
+        default_edge = 1.5 if model_mode == "Aggressive" else (2.0 if model_mode == "Balanced" else 3.0)
         with c5:
             min_edge = st.slider("Smaller-card min edge %", -3.0, 8.0, default_edge, 0.5)
         with c6:
