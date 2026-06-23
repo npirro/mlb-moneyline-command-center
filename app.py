@@ -10,7 +10,7 @@ import requests
 import streamlit as st
 import pytz
 
-st.set_page_config(page_title="MLB Moneyline Command Center", page_icon="⚾", layout="wide")
+st.set_page_config(page_title="MLB Moneyline Command Center", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
 EASTERN = pytz.timezone("America/New_York")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
@@ -60,6 +60,31 @@ button[kind="primary"] { background: linear-gradient(90deg,#12b76a,#168cff) !imp
 .hero-sub { color:#b8cad7; font-size: .95rem; margin-top: 6px; }
 .big-status { font-size: 1.8rem; font-weight: 950; letter-spacing:.04em; }
 [data-testid="stDataFrame"] { background: rgba(12,28,42,.75); border-radius: 14px; }
+
+/* V3 polish: full-width app, denser cards, closer to the dashboard mockup */
+[data-testid="stHeader"], [data-testid="stToolbar"], footer { visibility: hidden; height: 0px; }
+.block-container { padding: .35rem .85rem 1.25rem .85rem; max-width: 100% !important; }
+section.main > div { max-width: 100% !important; }
+[data-testid="stSidebar"] { width: 275px !important; min-width: 275px !important; }
+.hero { margin-top: 0; padding: 14px 18px; }
+.hero-title { font-size: 1.9rem; }
+.metric-card { min-height: 96px; padding: 14px 16px; }
+.metric-value { font-size: 1.75rem; }
+.panel-tight { background: linear-gradient(180deg, rgba(17,38,54,.96), rgba(10,24,36,.96)); border: 1px solid #263d50; border-radius: 12px; padding: 14px; box-shadow: 0 10px 24px rgba(0,0,0,.22); margin-bottom: 12px; }
+.left-rail-card { background: linear-gradient(180deg, rgba(14,33,48,.98), rgba(8,19,30,.98)); border: 1px solid #263d50; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+.status-pill { display:inline-block; padding: 7px 14px; border-radius: 999px; font-weight: 950; letter-spacing:.04em; background: linear-gradient(90deg,#ffb020,#ff8a00); color:#06101b; text-transform: uppercase; }
+.status-pill.bad { background: linear-gradient(90deg,#ff4d4d,#8b1d2c); color:#fff; }
+.status-pill.good { background: linear-gradient(90deg,#27e56f,#0e9444); color:#06101b; }
+.rail-grade { font-size: 2.25rem; font-weight: 950; color: #fff; line-height:1; margin-top: 8px; }
+.rail-line { display:flex; justify-content:space-between; border-bottom: 1px solid rgba(255,255,255,.06); padding: 5px 0; color: #d7e6f0; font-size:.9rem; }
+.rail-line b { color:#31e56b; }
+.top-nav { display:flex; align-items:center; gap:10px; border:1px solid #1d3447; border-radius:14px; padding:8px 10px; background:rgba(5,14,24,.55); margin: 8px 0 12px 0; }
+.nav-pill { border-radius:999px; padding:8px 14px; background:rgba(18,43,62,.9); color:#b6cad8; font-weight:800; font-size:.88rem; }
+.nav-pill.active { background:linear-gradient(90deg,rgba(49,229,107,.30),rgba(46,140,255,.20)); color:white; border:1px solid rgba(49,229,107,.65); }
+div[data-testid="stHorizontalBlock"] { gap: .75rem; }
+.stDataFrame [data-testid="stTable"] { font-size: .85rem; }
+[data-testid="stExpander"] { border: 1px solid #263d50; border-radius: 12px; background: rgba(10,24,36,.74); }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -564,27 +589,51 @@ def recommended_tickets(qdf: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
+def _display_cols(df, cols):
+    return df[[c for c in cols if c in df.columns]].copy()
+
+
 def main():
     st.markdown("""
     <div class='hero'>
-      <div class='hero-title'>⚾ MLB Moneyline Command Center</div>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center</div>
       <div class='hero-sub'>Live odds, model scoring, ticket builder, trap favorites, boosters, and slate warnings — built for 3–6 leg moneyline decision-making.</div>
     </div>
+    <div class='top-nav'>
+      <span class='nav-pill active'>Command Center</span>
+      <span class='nav-pill'>Full Slate</span>
+      <span class='nav-pill'>Ticket Builder</span>
+      <span class='nav-pill'>Team Detail</span>
+      <span class='nav-pill'>Results</span>
+      <span style='margin-left:auto;color:#9db3c5;font-size:.82rem;'>Informational only. Bet responsibly.</span>
+    </div>
     """, unsafe_allow_html=True)
-    st.caption("Informational only. Bet responsibly.")
 
-    with st.sidebar:
-        st.header("Controls")
+    # Controls are inside the page instead of the Streamlit sidebar so the app looks like a real dashboard.
+    with st.expander("⚙️ Dashboard controls", expanded=False):
         today = datetime.now(EASTERN).date()
-        target_date = st.date_input("Slate date", today)
-        regions = st.selectbox("Sportsbook region", ["us", "us2", "uk", "eu", "au"], index=0)
-        bookmakers = st.text_input("Bookmakers filter (optional)", value="", placeholder="fanduel,draftkings,betmgm")
-        model_mode = st.selectbox("Model strictness", ["Balanced", "Conservative", "Aggressive"], index=0)
-        default_edge = 0.5 if model_mode == "Aggressive" else (1.5 if model_mode == "Balanced" else 3.0)
-        min_edge = st.slider("Qualified min edge %", 0.0, 8.0, default_edge, 0.5)
-        max_fav = st.slider("Max favorite price", -300, -120, -260, 5)
-        max_dog = st.slider("Max underdog price", 100, 250, 200, 5)
-        st.divider()
+        c1, c2, c3, c4 = st.columns([1,1,2,1])
+        with c1:
+            target_date = st.date_input("Slate date", today)
+        with c2:
+            regions = st.selectbox("Sportsbook region", ["us", "us2", "uk", "eu", "au"], index=0)
+        with c3:
+            bookmakers = st.text_input("Bookmakers filter", value="fanduel,draftkings,betmgm", placeholder="fanduel,draftkings,betmgm")
+        with c4:
+            model_mode = st.selectbox("Model strictness", ["Balanced", "Conservative", "Aggressive"], index=0)
+
+        c5, c6, c7, c8 = st.columns([1,1,1,1])
+        default_edge = 0.0 if model_mode == "Aggressive" else (1.0 if model_mode == "Balanced" else 2.5)
+        with c5:
+            min_edge = st.slider("Qualified min edge %", -2.0, 8.0, default_edge, 0.5)
+        with c6:
+            max_fav = st.slider("Max favorite price", -300, -120, -260, 5)
+        with c7:
+            max_dog = st.slider("Max underdog price", 100, 250, 200, 5)
+        with c8:
+            refresh = st.button("🔄 Refresh odds + model", type="primary", use_container_width=True)
+
         api_key = ""
         try:
             api_key = st.secrets.get("ODDS_API_KEY", "")
@@ -592,11 +641,18 @@ def main():
             api_key = os.environ.get("ODDS_API_KEY", "")
         if not api_key:
             api_key = st.text_input("Odds API key", type="password")
-        refresh = st.button("🔄 Refresh odds + model", type="primary", use_container_width=True)
         st.caption("On Streamlit Cloud, store ODDS_API_KEY in app secrets so it is not public.")
 
+    # Defaults when controls are closed after first render.
+    if 'target_date' not in locals():
+        target_date = datetime.now(EASTERN).date(); regions='us'; bookmakers='fanduel,draftkings,betmgm'; model_mode='Balanced'; min_edge=1.0; max_fav=-260; max_dog=200; refresh=False
+        try:
+            api_key = st.secrets.get("ODDS_API_KEY", "")
+        except Exception:
+            api_key = os.environ.get("ODDS_API_KEY", "")
+
     if not api_key:
-        st.warning("Add your The Odds API key in Streamlit secrets or paste it in the sidebar to run the dashboard.")
+        st.warning("Add your The Odds API key in Streamlit secrets or paste it in Dashboard controls to run the dashboard.")
         st.stop()
 
     if refresh:
@@ -611,125 +667,173 @@ def main():
             st.code("\n".join(meta["errors"][:10]))
         st.stop()
 
-    # Apply user risk filters for qualification. Keep full board intact.
+    # Qualification logic. This still protects the full-ticket recommendation, but never leaves the screen empty.
     eligible = df[(df["Edge %"] >= min_edge) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog) & (df["Tier"].isin(["A", "B+", "B"]))].copy()
     qualified = eligible[eligible["Tier"].isin(["A", "B+"])].copy()
-    # Always build a visible watchlist so a weak slate still gives useful output.
-    watchlist = df[(df["Edge %"] > 0) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog) & (df["Tier"].isin(["A", "B+", "B", "Lean"]))].copy()
-    watchlist = watchlist.sort_values(["Edge %", "Score"], ascending=[False, False]).head(8)
-    tier_a = int((qualified["Tier"] == "A").sum())
-    tier_bp = int((qualified["Tier"] == "B+").sum())
+    watchlist = df[(df["Edge %"] > -1.5) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog) & (df["Tier"].isin(["A", "B+", "B", "Lean", "No Bet"]))].copy()
+    watchlist = watchlist.sort_values(["Edge %", "Score"], ascending=[False, False]).head(10)
+    fallback = df.sort_values(["Score", "Edge %"], ascending=[False, False]).head(10)
+    best_available = qualified if not qualified.empty else (watchlist if not watchlist.empty else fallback)
+
+    tier_a = int((qualified["Tier"] == "A").sum()) if not qualified.empty else 0
+    tier_bp = int((qualified["Tier"] == "B+").sum()) if not qualified.empty else 0
     qlegs = len(qualified)
     avg_edge = qualified["Edge %"].mean() if qlegs else 0
     status, play_type = slate_status(qlegs, tier_a, tier_bp)
+    if qlegs == 0 and not best_available.empty:
+        status = "WATCHLIST ONLY"
+        play_type = "No full card"
     grade = grade_from(qlegs, avg_edge)
 
+    # Tabs remain functional, but the first tab is designed as the dense command center.
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Command Center", "Full Slate", "Ticket Builder", "Team Detail", "Results / Export"])
 
     with tab1:
-        c1,c2,c3,c4,c5,c6 = st.columns(6)
-        with c1: render_metric("Games Today", meta.get("schedule_games", 0), "View full slate", "blue")
-        with c2: render_metric("Qualified Legs", qlegs, "Tier A/B+", "green")
-        with c3: render_metric("Tier A Legs", tier_a, "Best plays", "green")
-        with c4: render_metric("Tier B+ Legs", tier_bp, "Solid plays", "yellow")
-        with c5: render_metric("Best Play Type", play_type, "Recommended", "yellow")
-        hit3 = np.prod((qualified.head(3)["Model Win %"] / 100)) * 100 if len(qualified) >= 3 else 0
-        with c6: render_metric("Est. Hit % (3-leg)", f"{hit3:.1f}%" if hit3 else "—", "Based on top 3", "")
+        rail, body = st.columns([1.08, 6.2], gap="medium")
+        with rail:
+            pill_class = "good" if qlegs >= 5 else ("bad" if qlegs <= 1 else "")
+            st.markdown(f"""
+            <div class='left-rail-card'>
+              <div class='metric-title'>Today's Slate</div>
+              <div style='font-size:.9rem;color:#b8cad7;margin-top:6px;'>{target_date.strftime('%a %b %-d')}</div>
+              <div class='metric-value blue'>{meta.get('schedule_games', 0)}</div>
+              <div class='small-note'>games today</div>
+              <hr />
+              <div class='metric-title'>Slate Status</div>
+              <div style='margin-top:8px;'><span class='status-pill {pill_class}'>{status}</span></div>
+              <div class='rail-grade'>{grade}</div>
+              <div class='small-note'>slate grade</div>
+              <div style='margin-top:12px;'>
+                <div class='rail-line'><span>Qualified Legs</span><b>{qlegs}</b></div>
+                <div class='rail-line'><span>Tier A Legs</span><b>{tier_a}</b></div>
+                <div class='rail-line'><span>Tier B+ Legs</span><b style='color:#ffc928'>{tier_bp}</b></div>
+                <div class='rail-line'><span>Best Play</span><b style='color:#ffc928'>{play_type}</b></div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-        left, right = st.columns([2,1])
-        with left:
-            st.markdown(f"<div class='panel'><div class='section-title'>Main Recommended Ticket</div>", unsafe_allow_html=True)
-            if qlegs >= 5:
-                main_ticket = qualified.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).head(5)
-                st.dataframe(main_ticket[["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Tier","Risk","Probable Pitcher"]], use_container_width=True, hide_index=True)
-                odds_val = parlay_american(main_ticket["Odds"].tolist())
-                st.success(f"Recommended 5-leg main ticket: {format_odds(odds_val)} estimated odds. Slate grade: {grade}.")
-            elif qlegs >= 3:
-                main_ticket = qualified.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).head(qlegs)
-                st.dataframe(main_ticket[["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Tier","Risk","Probable Pitcher"]], use_container_width=True, hide_index=True)
-                odds_val = parlay_american(main_ticket["Odds"].tolist())
-                st.warning(f"{status}: only {qlegs} qualified legs. Smaller {qlegs}-leg card supported at about {format_odds(odds_val)}. Do not force a 5-leg ticket unless using boosters.")
-            elif qlegs > 0:
-                st.dataframe(qualified[["Team","Opponent","Odds","Book","Model Win %","Edge %","Tier","Risk"]], use_container_width=True, hide_index=True)
-                st.warning(f"{status}: use singles or a tiny 2-leg only. No main parlay.")
-            else:
-                st.error("No Tier A/B+ qualified legs under the current filters. No main 5-leg ticket today.")
-                if not watchlist.empty:
-                    st.markdown("**Best available smaller-play candidates / watchlist:**")
-                    st.dataframe(watchlist[["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Tier","Risk","Probable Pitcher"]], use_container_width=True, hide_index=True)
-                    st.info("These are not full-ticket qualifiers, but they are the legs the model would suggest if you want a smaller or lighter-risk play.")
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown("<div class='panel'><div class='section-title'>All Qualified Legs / Best Available</div>", unsafe_allow_html=True)
-            show_cols = ["Start","Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk"]
-            display_legs = qualified if not qualified.empty else watchlist
-            st.dataframe(display_legs[show_cols], use_container_width=True, hide_index=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        with right:
-            st.markdown("<div class='panel'><div class='section-title'>Slate Status</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='big-status'>{status}</div>", unsafe_allow_html=True)
-            st.markdown(f"**Slate Grade:** {grade}")
-            st.markdown(f"**Recommended:** {play_type}")
-            st.caption(f"Last refresh: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}")
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown("<div class='panel'><div class='section-title'>Optional Booster Leg</div>", unsafe_allow_html=True)
-            boosters = eligible[~eligible.index.isin(qualified.head(5).index)].sort_values(["Edge %","Score"], ascending=[False, False]).head(3)
-            if boosters.empty and len(df) > 0:
-                boosters = df[(df["Tier"].isin(["B","Lean"])) & (df["Edge %"] > 0)].sort_values(["Edge %","Score"], ascending=[False, False]).head(3)
-            if boosters.empty:
-                st.caption("No booster leg recommended.")
-            else:
-                st.dataframe(boosters[["Team","Odds","Model Win %","Edge %","Tier","Risk"]], use_container_width=True, hide_index=True)
-                st.caption("Optional only. Use for higher payout only if you accept more risk.")
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown("<div class='panel'><div class='section-title red'>Trap Favorites / Do Not Use</div>", unsafe_allow_html=True)
-            traps = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(8)
-            if traps.empty:
-                st.caption("No major trap favorites detected.")
-            else:
-                st.dataframe(traps[["Team","Opponent","Odds","Model Win %","Implied %","Edge %","Risk"]], use_container_width=True, hide_index=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown("<div class='panel'><div class='section-title yellow'>Data Warnings</div>", unsafe_allow_html=True)
-            warning_lines = meta.get("warnings", [])[:8]
+            st.markdown("<div class='left-rail-card'><div class='metric-title'>Data Warnings</div>", unsafe_allow_html=True)
+            warning_lines = meta.get("warnings", [])[:5]
             if warning_lines:
                 for w in warning_lines:
-                    st.write(f"⚠️ {w}")
+                    st.markdown(f"<div style='color:#ffc928;font-size:.86rem;margin-top:7px;'>⚠️ {w}</div>", unsafe_allow_html=True)
             else:
-                st.caption("No major API warnings.")
-            st.caption("Confirmed lineups are not included in this free-data version. Refresh closer to first pitch.")
-            st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown("<div class='small-note'>No major API warnings.</div>", unsafe_allow_html=True)
+            st.markdown("<div style='color:#9db3c5;font-size:.78rem;margin-top:10px;'>Lineups are not fully confirmed in this free-data version. Refresh close to first pitch.</div></div>", unsafe_allow_html=True)
+
+            st.markdown(f"""
+            <div class='left-rail-card'>
+              <div class='metric-title'>Refresh Settings</div>
+              <div class='rail-line'><span>Mode</span><b>{model_mode}</b></div>
+              <div class='rail-line'><span>Min Edge</span><b>{min_edge:.1f}%</b></div>
+              <div class='rail-line'><span>Max Fav</span><b>{max_fav}</b></div>
+              <div class='rail-line'><span>Max Dog</span><b>+{max_dog}</b></div>
+              <div class='small-note' style='margin-top:8px;'>Last refresh: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with body:
+            c1,c2,c3,c4,c5,c6 = st.columns(6)
+            with c1: render_metric("Games Today", meta.get("schedule_games", 0), "View full slate", "blue")
+            with c2: render_metric("Qualified Legs", qlegs, "Tier A/B+", "green")
+            with c3: render_metric("Tier A Legs", tier_a, "Best plays", "green")
+            with c4: render_metric("Tier B+ Legs", tier_bp, "Solid plays", "yellow")
+            with c5: render_metric("Best Play Type", play_type, "Recommended", "yellow")
+            hit3 = np.prod((best_available.head(3)["Model Win %"] / 100)) * 100 if len(best_available) >= 3 else 0
+            with c6: render_metric("Est. Hit % (3-leg)", f"{hit3:.1f}%" if hit3 else "—", "Based on top 3", "")
+
+            top_left, top_right = st.columns([2.15, 1], gap="medium")
+            with top_left:
+                st.markdown("<div class='panel-tight'><div class='section-title'>Main Recommended Ticket</div>", unsafe_allow_html=True)
+                main_cols = ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Tier","Risk","Probable Pitcher"]
+                if qlegs >= 5:
+                    main_ticket = qualified.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).head(5)
+                    st.dataframe(_display_cols(main_ticket, main_cols), use_container_width=True, hide_index=True, height=250)
+                    odds_val = parlay_american(main_ticket["Odds"].tolist())
+                    st.success(f"Recommended 5-leg main ticket: {format_odds(odds_val)} estimated odds. Slate grade: {grade}.")
+                elif qlegs >= 3:
+                    main_ticket = qualified.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).head(qlegs)
+                    st.dataframe(_display_cols(main_ticket, main_cols), use_container_width=True, hide_index=True, height=210)
+                    odds_val = parlay_american(main_ticket["Odds"].tolist())
+                    st.warning(f"Only {qlegs} qualified legs. Smaller {qlegs}-leg card supported at about {format_odds(odds_val)}. Do not force a 5-leg ticket unless using boosters.")
+                elif qlegs > 0:
+                    st.dataframe(_display_cols(qualified, main_cols), use_container_width=True, hide_index=True, height=160)
+                    st.warning("Use singles or a tiny 2-leg only. No main parlay.")
+                else:
+                    st.error("No Tier A/B+ qualified legs under the current filters. No main 5-leg ticket today.")
+                    st.markdown("**Best available smaller-play / near-miss candidates:**")
+                    st.dataframe(_display_cols(best_available, main_cols), use_container_width=True, hide_index=True, height=260)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            with top_right:
+                st.markdown("<div class='panel-tight'><div class='section-title'>Optional Booster Legs</div>", unsafe_allow_html=True)
+                taken = set(best_available.head(5).index)
+                boosters = df[(~df.index.isin(taken)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
+                if boosters.empty:
+                    st.caption("No booster leg recommended.")
+                else:
+                    st.dataframe(_display_cols(boosters, ["Team","Odds","Model Win %","Edge %","Tier","Risk"]), use_container_width=True, hide_index=True, height=180)
+                    st.caption("Optional only. Use for higher payout only if you accept more risk.")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                st.markdown("<div class='panel-tight'><div class='section-title red'>Trap Favorites / Do Not Use</div>", unsafe_allow_html=True)
+                traps = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
+                if traps.empty:
+                    st.caption("No major trap favorites detected.")
+                else:
+                    st.dataframe(_display_cols(traps, ["Team","Opponent","Odds","Model Win %","Implied %","Risk"]), use_container_width=True, hide_index=True, height=180)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            bottom_left, bottom_right = st.columns([1.5, 1], gap="medium")
+            with bottom_left:
+                st.markdown("<div class='panel-tight'><div class='section-title'>All Qualified Legs / Best Available</div>", unsafe_allow_html=True)
+                show_cols = ["Start","Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Score","Tier","Risk"]
+                st.dataframe(_display_cols(best_available, show_cols), use_container_width=True, hide_index=True, height=330)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            with bottom_right:
+                st.markdown("<div class='panel-tight'><div class='section-title'>Team / Game Breakdown</div>", unsafe_allow_html=True)
+                default_team = best_available.iloc[0]["Team"] if not best_available.empty else df.iloc[0]["Team"]
+                selected = st.selectbox("Select team", df["Team"].tolist(), index=df["Team"].tolist().index(default_team) if default_team in df["Team"].tolist() else 0, key="cc_team_select")
+                row = df[df["Team"] == selected].iloc[0]
+                st.markdown(f"<div style='font-size:1.2rem;font-weight:900;color:white;'>{row['Team']}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='small-note'>Moneyline: <b>{format_odds(row['Odds'])}</b> at {row['Book']} • Tier {row['Tier']} • {row['Risk']}</div>", unsafe_allow_html=True)
+                a,b = st.columns(2)
+                with a:
+                    st.metric("Model Win %", f"{row['Model Win %']:.1f}%", f"Edge {row['Edge %']:.1f}%")
+                with b:
+                    st.metric("Score", f"{row['Score']:.1f}", row['Probable Pitcher'])
+                breakdown = pd.DataFrame({"Category": ["Starting Pitcher","Offense","Bullpen","Market","Environment"], "Score": [row["SP Score"], row["Offense Score"], row["Bullpen Proxy"], row["Market Score"], row["Environment Score"]], "Max": [30,25,15,20,10]})
+                st.dataframe(breakdown, use_container_width=True, hide_index=True, height=210)
+                st.caption(str(row["Notes"])[:240])
+                st.markdown("</div>", unsafe_allow_html=True)
 
     with tab2:
         st.subheader("Full Slate Board")
         tier_filter = st.multiselect("Tier filter", ["A","B+","B","Lean","No Bet"], default=["A","B+","B","Lean","No Bet"])
         fdf = df[df["Tier"].isin(tier_filter)].copy()
-        st.dataframe(fdf[["Start","Game","Team","Opponent","Home/Away","Odds","Book","Market %","Model Win %","Implied %","Edge %","Score","Tier","Risk","Probable Pitcher","Notes"]], use_container_width=True, hide_index=True)
+        st.dataframe(_display_cols(fdf, ["Start","Game","Team","Opponent","Home/Away","Odds","Book","Market %","Model Win %","Implied %","Edge %","Score","Tier","Risk","Probable Pitcher","Notes"]), use_container_width=True, hide_index=True)
 
     with tab3:
         st.subheader("Auto Ticket Builder")
-        ticket_source = eligible if not eligible.empty else watchlist
-        ticket_df = recommended_tickets(ticket_source if not ticket_source.empty else df[df["Edge %"] > 0])
+        ticket_source = eligible if not eligible.empty else best_available
+        ticket_df = recommended_tickets(ticket_source if not ticket_source.empty else df[df["Edge %"] > -2])
         if ticket_df.empty:
             st.info("No ticket combinations available.")
         else:
             st.dataframe(ticket_df, use_container_width=True, hide_index=True)
-        st.markdown("### Core vs Boosters")
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Core Legs**")
-            st.dataframe(qualified.head(6)[["Team","Odds","Model Win %","Edge %","Tier","Risk"]], use_container_width=True, hide_index=True)
+            st.dataframe(_display_cols(best_available.head(6), ["Team","Odds","Model Win %","Edge %","Tier","Risk"]), use_container_width=True, hide_index=True)
         with c2:
             st.markdown("**Optional Add-Ons**")
-            st.dataframe(boosters[["Team","Odds","Model Win %","Edge %","Tier","Risk"]] if 'boosters' in locals() and not boosters.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
+            st.dataframe(_display_cols(boosters, ["Team","Odds","Model Win %","Edge %","Tier","Risk"]) if 'boosters' in locals() and not boosters.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
 
     with tab4:
         st.subheader("Team / Game Breakdown")
         teams = df["Team"].tolist()
-        selected = st.selectbox("Select team", teams)
+        selected = st.selectbox("Select team", teams, key="detail_team_select")
         row = df[df["Team"] == selected].iloc[0]
         c1, c2, c3 = st.columns([1,1,1])
         with c1:
@@ -737,11 +841,7 @@ def main():
             st.metric("Moneyline", format_odds(row["Odds"]), row["Book"])
             st.metric("Tier", row["Tier"], row["Risk"])
         with c2:
-            breakdown = pd.DataFrame({
-                "Category": ["Starting Pitcher","Offense","Bullpen Proxy","Market Edge","Environment"],
-                "Score": [row["SP Score"], row["Offense Score"], row["Bullpen Proxy"], row["Market Score"], row["Environment Score"]],
-                "Max": [30,25,15,20,10]
-            })
+            breakdown = pd.DataFrame({"Category": ["Starting Pitcher","Offense","Bullpen Proxy","Market Edge","Environment"], "Score": [row["SP Score"], row["Offense Score"], row["Bullpen Proxy"], row["Market Score"], row["Environment Score"]], "Max": [30,25,15,20,10]})
             st.dataframe(breakdown, use_container_width=True, hide_index=True)
         with c3:
             st.write("**Key Notes**")
