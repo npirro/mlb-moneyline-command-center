@@ -756,7 +756,7 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     """
     html = f"""
     {css}<div class='cc'>
-      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v9 strict edge model</div></div>
+      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v10 winner-first parlay model</div></div>
       <div class='grid'>
         <div class='rail'>
           <div class='label'>Today's Slate</div><div style='margin:10px 0 8px;'><span class='datebox'>{target_date.strftime('%a').upper()}<br>{target_date.strftime('%b %-d').upper()}</span><span class='games'>{meta.get('schedule_games',0)}</span></div><div class='note'>games today</div><hr style='border-color:#20384c;margin:14px 0;'>
@@ -853,16 +853,48 @@ def main():
             st.code("\n".join(meta["errors"][:10]))
         st.stop()
 
-    # v8 tightened qualification logic.
-    # Suggested legs require a real edge. Thin edges still appear as watchlist only, never as a recommended ticket.
-    price_ok = (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)
-    eligible = df[price_ok & (df["Edge %"] >= min_edge) & (df["Tier"].isin(["A", "B+", "B"]))].copy()
-    qualified = eligible.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).copy()
-    full_ticket_qualified = qualified[qualified["Tier"].isin(["A", "B+"])].copy()
+    # v10 winner-first parlay logic.
+    # This is NOT pure +EV singles mode. Official parlay legs must be likely winners first,
+    # then have enough price value to avoid overpaying.
+    price_ok = (df["Odds"].notna()) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)
+    clean_risk = ~df["Risk"].str.contains("Game started|Odds missing|Long dog", case=False, na=False)
 
-    watchlist = df[price_ok & (df["Edge %"] >= 0.0) & (df["Tier"].isin(["Lean", "Thin Edge", "B", "B+", "A"]))].copy()
-    watchlist = watchlist.sort_values(["Edge %", "Score"], ascending=[False, False]).head(10)
-    fallback = df[price_ok].sort_values(["Score", "Edge %"], ascending=[False, False]).head(10)
+    # Official parlay candidates: winner-first filter.
+    raw_parlay = df[
+        price_ok
+        & clean_risk
+        & (df["Model Win %"].fillna(0) >= 54.0)
+        & (df["Edge %"].fillna(-99) >= max(1.5, min_edge))
+        & (df["Score"].fillna(0) >= 70.0)
+        & (df["Tier"].isin(["A", "B+", "B"]))
+    ].copy()
+
+    # One side per game, with conflict protection. If both sides grade too close, skip the game.
+    qualified = one_side_per_game(raw_parlay, min_edge_gap=0.75)
+    eligible = qualified.copy()
+
+    # Stronger full-ticket legs: higher win probability or stronger edge.
+    full_ticket_qualified = qualified[
+        (qualified["Model Win %"].fillna(0) >= 56.0)
+        & (qualified["Edge %"].fillna(-99) >= 2.0)
+        & (qualified["Tier"].isin(["A", "B+"]))
+    ].copy()
+
+    # Value dogs/watchlist are shown for transparency, but are NOT parlay legs.
+    value_watchlist = df[
+        price_ok
+        & (df["Model Win %"].fillna(0) >= 45.0)
+        & (df["Edge %"].fillna(-99) >= 3.0)
+    ].copy()
+    value_watchlist = one_side_per_game(value_watchlist, min_edge_gap=0.75)
+
+    # Best available is parlay candidates first; otherwise winner-leaning teams that are closest to qualifying.
+    near_miss = df[price_ok & (df["Model Win %"].fillna(0) >= 51.0)].copy()
+    near_miss = one_side_per_game(near_miss.sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False]), min_edge_gap=0.50)
+    watchlist = pd.concat([value_watchlist, near_miss], ignore_index=True).drop_duplicates(subset=["Team","Opponent","Game"], keep="first") if not value_watchlist.empty or not near_miss.empty else pd.DataFrame()
+    if not watchlist.empty:
+        watchlist = watchlist.sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False]).head(10)
+    fallback = one_side_per_game(df[price_ok].sort_values(["Model Win %", "Score", "Edge %"], ascending=[False, False, False]), min_edge_gap=0.50).head(10)
     best_available = qualified if not qualified.empty else (watchlist if not watchlist.empty else fallback)
 
     tier_a = int((full_ticket_qualified["Tier"] == "A").sum()) if "full_ticket_qualified" in locals() and not full_ticket_qualified.empty else 0
@@ -884,7 +916,7 @@ def main():
     boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
     traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
     render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
-    st.caption("v9 strict edge model: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
+    st.caption("v10 winner-first parlay model: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
 
     with st.expander("Advanced views: full slate, ticket builder, diagnostics", expanded=False):
         st.subheader("Full Slate Board")
@@ -1218,19 +1250,58 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
     }
     return out, meta2
 
+
+def one_side_per_game(df: pd.DataFrame, min_edge_gap: float = 0.75) -> pd.DataFrame:
+    """Keep at most one recommended side per game.
+
+    Ranking is winner-first, then edge, then score. If the top two sides in the same
+    game are too close on edge and model win probability, the game is treated as a
+    conflict and skipped for official recommendations.
+    """
+    if df is None or df.empty or "Game" not in df.columns:
+        return df.copy() if df is not None else pd.DataFrame()
+    d = df.copy()
+    for col in ["Model Win %", "Edge %", "Score", "Odds"]:
+        if col in d.columns:
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+    chosen = []
+    # preserve sorted order only inside each game based on our explicit winner-first priority
+    for _, g in d.groupby("Game", dropna=False, sort=False):
+        g = g.sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False])
+        if len(g) >= 2:
+            top = g.iloc[0]
+            second = g.iloc[1]
+            edge_gap = abs(float(top.get("Edge %", 0) or 0) - float(second.get("Edge %", 0) or 0))
+            win_gap = abs(float(top.get("Model Win %", 0) or 0) - float(second.get("Model Win %", 0) or 0))
+            # If both sides are essentially the same read, skip the game entirely.
+            if edge_gap < min_edge_gap and win_gap < 2.0:
+                continue
+        chosen.append(g.iloc[0])
+    if not chosen:
+        return d.iloc[0:0].copy()
+    out = pd.DataFrame(chosen)
+    return out.sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False]).reset_index(drop=True)
+
 def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int):
+    """v10 qualification used by the tabbed views: winner-first parlay mode."""
     dfx = df.copy()
-    for col in ["Edge %", "Score", "Odds"]:
+    for col in ["Edge %", "Score", "Odds", "Model Win %"]:
         if col in dfx.columns:
             dfx[col] = pd.to_numeric(dfx[col], errors="coerce")
     price_ok = (dfx["Odds"].notna()) & (dfx["Odds"] >= max_fav) & (dfx["Odds"] <= max_dog)
-    eligible = dfx[price_ok & (dfx["Edge %"].fillna(-99) >= min_edge)].copy()
-    qualified = eligible[eligible["Tier"].isin(["A", "B+", "B", "Lean"])].copy()
-    if qualified.empty:
-        qualified = dfx[price_ok].sort_values(["Edge %", "Score"], ascending=[False, False]).head(5).copy()
-    full_ticket_qualified = qualified[qualified["Tier"].isin(["A", "B+"])].copy()
-    fallback = dfx[price_ok].sort_values(["Edge %", "Score"], ascending=[False, False]).head(10)
-    best_available = qualified if not qualified.empty else fallback
+    clean_risk = ~dfx["Risk"].str.contains("Game started|Odds missing|Long dog", case=False, na=False) if "Risk" in dfx.columns else True
+    raw = dfx[
+        price_ok & clean_risk
+        & (dfx["Model Win %"].fillna(0) >= 54.0)
+        & (dfx["Edge %"].fillna(-99) >= max(1.5, min_edge))
+        & (dfx["Score"].fillna(0) >= 70.0)
+        & (dfx["Tier"].isin(["A", "B+", "B"]))
+    ].copy()
+    qualified = one_side_per_game(raw, min_edge_gap=0.75)
+    eligible = qualified.copy()
+    full_ticket_qualified = qualified[(qualified["Model Win %"].fillna(0) >= 56.0) & (qualified["Edge %"].fillna(-99) >= 2.0) & (qualified["Tier"].isin(["A", "B+"]))].copy()
+    watch = dfx[price_ok & (dfx["Model Win %"].fillna(0) >= 51.0)].sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False]).copy()
+    best_available = qualified if not qualified.empty else one_side_per_game(watch, min_edge_gap=0.50).head(10)
     return eligible, qualified, full_ticket_qualified, best_available
 
 
@@ -1459,6 +1530,38 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
     return df, meta
 
 
+
+def one_side_per_game(df: pd.DataFrame, min_edge_gap: float = 0.75) -> pd.DataFrame:
+    """Keep at most one recommended side per game.
+
+    Ranking is winner-first, then edge, then score. If the top two sides in the same
+    game are too close on edge and model win probability, the game is treated as a
+    conflict and skipped for official recommendations.
+    """
+    if df is None or df.empty or "Game" not in df.columns:
+        return df.copy() if df is not None else pd.DataFrame()
+    d = df.copy()
+    for col in ["Model Win %", "Edge %", "Score", "Odds"]:
+        if col in d.columns:
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+    chosen = []
+    # preserve sorted order only inside each game based on our explicit winner-first priority
+    for _, g in d.groupby("Game", dropna=False, sort=False):
+        g = g.sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False])
+        if len(g) >= 2:
+            top = g.iloc[0]
+            second = g.iloc[1]
+            edge_gap = abs(float(top.get("Edge %", 0) or 0) - float(second.get("Edge %", 0) or 0))
+            win_gap = abs(float(top.get("Model Win %", 0) or 0) - float(second.get("Model Win %", 0) or 0))
+            # If both sides are essentially the same read, skip the game entirely.
+            if edge_gap < min_edge_gap and win_gap < 2.0:
+                continue
+        chosen.append(g.iloc[0])
+    if not chosen:
+        return d.iloc[0:0].copy()
+    out = pd.DataFrame(chosen)
+    return out.sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False]).reset_index(drop=True)
+
 def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int):
     """v9 strict qualification.
 
@@ -1502,7 +1605,7 @@ def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int
 def main():
     st.markdown("""
     <div class='hero'>
-      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v9 strict edge model</span></div>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v10 winner-first parlay model</span></div>
       <div class='hero-sub'>Live odds, model scoring, ticket builder, trap favorites, boosters, diagnostics, and slate warnings.</div>
     </div>
     """, unsafe_allow_html=True)
