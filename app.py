@@ -756,7 +756,7 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     """
     html = f"""
     {css}<div class='cc'>
-      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v10 winner-first parlay model</div></div>
+      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v11 winner-first + no-dupe games</div></div>
       <div class='grid'>
         <div class='rail'>
           <div class='label'>Today's Slate</div><div style='margin:10px 0 8px;'><span class='datebox'>{target_date.strftime('%a').upper()}<br>{target_date.strftime('%b %-d').upper()}</span><span class='games'>{meta.get('schedule_games',0)}</span></div><div class='note'>games today</div><hr style='border-color:#20384c;margin:14px 0;'>
@@ -916,7 +916,7 @@ def main():
     boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
     traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
     render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
-    st.caption("v10 winner-first parlay model: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
+    st.caption("v11 winner-first + no-dupe games: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
 
     with st.expander("Advanced views: full slate, ticket builder, diagnostics", expanded=False):
         st.subheader("Full Slate Board")
@@ -1563,41 +1563,93 @@ def one_side_per_game(df: pd.DataFrame, min_edge_gap: float = 0.75) -> pd.DataFr
     return out.sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False]).reset_index(drop=True)
 
 def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int):
-    """v9 strict qualification.
+    """v11 winner-first qualification.
 
-    Official suggested legs must have a real positive edge and a Tier of B or better.
-    Lean/Thin Edge rows are watchlist only and should never populate the recommended card.
-    Negative-edge teams are never suggested, even when the score is high.
+    This separates true parlay candidates from pure value dogs.
+
+    Winner-First Suggested Legs:
+      - Team must be more likely than not to win (52%+ model win probability)
+      - Team must not be badly overpriced (positive edge threshold)
+      - One side per game only
+
+    Core / Full-Ticket Legs:
+      - Stronger winner threshold (54%+)
+      - Stronger edge threshold (1.5%+ or selected min edge)
+      - Score 70+
+
+    Value dogs can appear in the watchlist but are not official parlay legs.
     """
     dfx = df.copy()
-    for col in ["Edge %", "Score", "Odds", "Model Win %"]:
+    for col in ["Edge %", "Score", "Odds", "Model Win %", "Implied %"]:
         if col in dfx.columns:
             dfx[col] = pd.to_numeric(dfx[col], errors="coerce")
 
     price_ok = (dfx["Odds"].notna()) & (dfx["Odds"] >= max_fav) & (dfx["Odds"] <= max_dog)
-    base = dfx[price_ok & (dfx["Model Win %"].fillna(0) >= 45)].copy()
+    clean_risk = ~dfx["Risk"].str.contains("Game started|Odds missing|Long dog|High risk", case=False, na=False) if "Risk" in dfx.columns else True
+    base = dfx[price_ok & clean_risk].copy()
 
-    # Minimum for an official smaller-card suggestion. Default should be 2.0%.
-    hard_min_edge = max(float(min_edge), 2.0)
+    # v11 keeps winner-first, but does not require an unrealistic 54%+ for every smaller-card candidate.
+    # This is the key distinction:
+    #   suggested = can win + not overpriced
+    #   core/full ticket = stronger winner + stronger edge
+    suggested_min_win = 52.0
+    suggested_min_edge = 0.5 if float(min_edge) <= 2.0 else max(0.75, float(min_edge) - 1.25)
 
-    eligible = base[
-        (base["Edge %"].fillna(-99) >= hard_min_edge)
-        & (base["Tier"].isin(["A", "B+", "B"]))
+    suggested_raw = base[
+        (base["Model Win %"].fillna(0) >= suggested_min_win)
+        & (base["Edge %"].fillna(-99) >= suggested_min_edge)
+        & (base["Score"].fillna(0) >= 66.0)
     ].copy()
+    suggested_raw["Parlay Class"] = "Suggested Winner-First"
+    suggested = one_side_per_game(
+        suggested_raw.sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False]),
+        min_edge_gap=0.50
+    )
 
-    qualified = eligible.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).copy()
-
-    # Full-ticket legs are stricter than smaller-card suggestions.
-    full_ticket_qualified = base[
-        (base["Edge %"].fillna(-99) >= max(hard_min_edge, 3.0))
-        & (base["Tier"].isin(["A", "B+"]))
+    core_min_edge = max(1.5, float(min_edge) if float(min_edge) <= 3.0 else float(min_edge) - 0.5)
+    core_raw = base[
+        (base["Model Win %"].fillna(0) >= 54.0)
+        & (base["Edge %"].fillna(-99) >= core_min_edge)
+        & (base["Score"].fillna(0) >= 70.0)
+        & (base["Tier"].isin(["A", "B+", "B", "Lean"]))
     ].copy()
+    core_raw["Parlay Class"] = "Core Parlay"
+    core = one_side_per_game(
+        core_raw.sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False]),
+        min_edge_gap=0.75
+    )
 
-    # Watchlist shows the best available teams but does not call them recommendations.
-    watch = base[
-        (base["Edge %"].fillna(-99) > -0.5)
-        & (~base.index.isin(qualified.index))
-    ].sort_values(["Edge %", "Score"], ascending=[False, False]).head(10).copy()
+    full_ticket_qualified = core[
+        (core["Model Win %"].fillna(0) >= 55.0)
+        & (core["Edge %"].fillna(-99) >= max(1.5, float(min_edge)))
+        & (core["Score"].fillna(0) >= 72.0)
+    ].copy() if not core.empty else core.copy()
+
+    # Use suggested legs for smaller-card display, but reserve the stronger core set for full-ticket quality.
+    eligible = suggested.copy()
+    qualified = suggested.copy()
+
+    # Watchlist: winner-leaning but thin edge, plus high-edge dogs that are not parlay-safe.
+    winner_watch = base[
+        (base["Model Win %"].fillna(0) >= 50.0)
+        & (base["Score"].fillna(0) >= 62.0)
+        & (~base.index.isin(suggested_raw.index))
+    ].copy()
+    winner_watch["Parlay Class"] = "Winner Watchlist"
+
+    value_dogs = base[
+        (base["Model Win %"].fillna(0) >= 45.0)
+        & (base["Model Win %"].fillna(0) < 52.0)
+        & (base["Edge %"].fillna(-99) >= 2.5)
+    ].copy()
+    value_dogs["Parlay Class"] = "Value Dog / Singles Only"
+
+    watch = pd.concat([winner_watch, value_dogs], ignore_index=False) if not winner_watch.empty or not value_dogs.empty else pd.DataFrame()
+    if not watch.empty:
+        watch = one_side_per_game(
+            watch.sort_values(["Model Win %", "Edge %", "Score"], ascending=[False, False, False]),
+            min_edge_gap=0.50
+        ).head(10)
 
     best_available = qualified if not qualified.empty else watch
     return eligible, qualified, full_ticket_qualified, best_available
@@ -1605,7 +1657,7 @@ def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int
 def main():
     st.markdown("""
     <div class='hero'>
-      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v10 winner-first parlay model</span></div>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v11 winner-first + no-dupe games</span></div>
       <div class='hero-sub'>Live odds, model scoring, ticket builder, trap favorites, boosters, diagnostics, and slate warnings.</div>
     </div>
     """, unsafe_allow_html=True)
