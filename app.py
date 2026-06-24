@@ -701,7 +701,14 @@ def html_table(df: pd.DataFrame, cols: List[str], limit: int = 8, small: bool = 
         rows.append(f"<th>{html_escape(c)}</th>")
     rows.append("</tr></thead><tbody>")
     for _, r in view.iterrows():
-        rows.append("<tr>")
+        lineup_val = str(r.get("Lineup Status", "")).lower()
+        risk_val = str(r.get("Risk", "")).lower()
+        row_cls = ""
+        if "game started" in risk_val or "started" in lineup_val:
+            row_cls = " class='started'"
+        elif "projected" in lineup_val or "unconfirmed" in lineup_val or "unknown" in lineup_val or "provisional" in lineup_val:
+            row_cls = " class='provisional'"
+        rows.append(f"<tr{row_cls}>")
         for c in view.columns:
             val = r[c]
             if c == "Odds":
@@ -715,6 +722,10 @@ def html_table(df: pd.DataFrame, cols: List[str], limit: int = 8, small: bool = 
             elif c == "Tier":
                 cls = _tier_color(val)
                 cell = f"<span class='tier {cls}'>{html_escape(val)}</span>"
+            elif c == "Lineup Status":
+                lv = str(val)
+                lcls = "lineup-confirmed" if "Confirmed" in lv else ("lineup-started" if "Started" in lv else "lineup-projected")
+                cell = f"<span class='lineup-pill {lcls}'>{html_escape(lv)}</span>"
             else:
                 cell = html_escape(val)
             rows.append(f"<td>{cell}</td>")
@@ -751,12 +762,12 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     .nav{margin-left:auto;display:flex;gap:18px;color:#c9d7e3;font-weight:800;font-size:13px}.nav span:first-child{color:#27a9ff;border-bottom:3px solid #2b8cff;padding-bottom:17px}
     .update{font-size:11px;color:#b7c5d0;text-align:right}.btn{background:#1178d8;padding:10px 18px;border-radius:7px;color:white;font-weight:900}
     .grid{display:grid;grid-template-columns:180px 1.5fr 1fr;gap:14px}.rail,.panel,.card{background:linear-gradient(180deg,#0e2130,#081827);border:1px solid #213b50;border-radius:8px;box-shadow:0 10px 24px rgba(0,0,0,.25)}
-    .rail{padding:14px}.datebox{border:1px solid #2a4256;border-radius:6px;padding:8px;text-align:center;width:62px;display:inline-block;color:#d7e4ee;font-weight:900}.games{font-size:36px;font-weight:950;margin-left:15px;vertical-align:middle}.label{font-size:11px;text-transform:uppercase;color:#b8c9d6;font-weight:900;letter-spacing:.06em}.pill{display:inline-block;border-radius:999px;padding:8px 15px;font-weight:950;text-transform:uppercase;font-size:12px}.pill.good{background:#1ee06b;color:#06101a}.pill.warn{background:#ffb11b;color:#06101a}.pill.bad{background:#ff4e55;color:white}.grade{font-size:34px;font-weight:950;margin:10px 0 0}.railrow{display:flex;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.08);padding:6px 0;font-size:13px;color:#d9e7ef}.railrow b{color:#31e56b}.warntext{color:#ffc928;font-size:12px;margin:7px 0}.errtext{color:#ff6161;font-size:11px;margin:6px 0}.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px}.card{padding:13px 15px;min-height:82px}.card .val{font-size:28px;font-weight:950;margin-top:9px}.green{color:#31e56b}.yellow{color:#ffc928}.blue{color:#2e8cff}.panel{padding:14px;margin-bottom:14px}.title{color:#31e56b;text-transform:uppercase;font-weight:950;letter-spacing:.08em;font-size:15px;margin-bottom:10px}.redtitle{color:#ff5757}.subgrid{display:grid;grid-template-columns:1.7fr 1fr;gap:14px}.dash-table{width:100%;border-collapse:collapse;font-size:13px;overflow:hidden}.dash-table th{color:#c5d3df;text-transform:uppercase;font-size:10px;letter-spacing:.04em;text-align:left;border-bottom:1px solid #244258;padding:9px 8px}.dash-table td{border-bottom:1px solid rgba(255,255,255,.07);padding:9px 8px;color:#eff6fb;white-space:nowrap}.dash-table.small{font-size:12px}.dash-table.small td{padding:7px 7px}.pos{color:#31e56b;font-weight:950}.neg{color:#ff5757;font-weight:950}.badtxt{color:#ff5757;font-weight:950}.muted{color:#8ea3b4}.tier{border-radius:999px;padding:3px 8px;font-weight:950;font-size:11px}.tier.good{background:rgba(49,229,107,.14);color:#31e56b}.tier.warn{background:rgba(255,201,40,.14);color:#ffc928}.tier.info{background:rgba(46,140,255,.14);color:#2e8cff}.tier.bad{background:rgba(255,69,69,.14);color:#ff5757}.ticketstats{display:grid;grid-template-columns:repeat(5,1fr);border:1px solid #203b50;border-radius:8px;margin-top:12px}.ticketstats div{padding:12px;text-align:center;border-right:1px solid #203b50}.ticketstats div:last-child{border-right:0}.big{font-size:22px;font-weight:950}.detail{display:grid;grid-template-columns:1fr 1fr;gap:10px}.note{color:#aabcc9;font-size:12px}.breakrow{display:flex;justify-content:space-between;margin:7px 0;font-size:12px}.bar{height:8px;background:#163144;border-radius:999px;overflow:hidden}.bar span{display:block;height:100%;background:#36d566}.empty{padding:18px;color:#9db1c1;font-size:13px}.footer{font-size:11px;color:#7f91a1;text-align:center;margin-top:8px}.diag{font-size:11px;color:#8fa2b1;margin-top:8px}.teamhead{font-size:20px;font-weight:950;margin:5px 0}.risk{color:#ffc928;font-size:12px}.statusbox{font-size:30px;font-weight:950}.side-stack{display:grid;gap:14px}
+    .rail{padding:14px}.datebox{border:1px solid #2a4256;border-radius:6px;padding:8px;text-align:center;width:62px;display:inline-block;color:#d7e4ee;font-weight:900}.games{font-size:36px;font-weight:950;margin-left:15px;vertical-align:middle}.label{font-size:11px;text-transform:uppercase;color:#b8c9d6;font-weight:900;letter-spacing:.06em}.pill{display:inline-block;border-radius:999px;padding:8px 15px;font-weight:950;text-transform:uppercase;font-size:12px}.pill.good{background:#1ee06b;color:#06101a}.pill.warn{background:#ffb11b;color:#06101a}.pill.bad{background:#ff4e55;color:white}.grade{font-size:34px;font-weight:950;margin:10px 0 0}.railrow{display:flex;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.08);padding:6px 0;font-size:13px;color:#d9e7ef}.railrow b{color:#31e56b}.warntext{color:#ffc928;font-size:12px;margin:7px 0}.errtext{color:#ff6161;font-size:11px;margin:6px 0}.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px}.card{padding:13px 15px;min-height:82px}.card .val{font-size:28px;font-weight:950;margin-top:9px}.green{color:#31e56b}.yellow{color:#ffc928}.blue{color:#2e8cff}.panel{padding:14px;margin-bottom:14px}.title{color:#31e56b;text-transform:uppercase;font-weight:950;letter-spacing:.08em;font-size:15px;margin-bottom:10px}.redtitle{color:#ff5757}.subgrid{display:grid;grid-template-columns:1.7fr 1fr;gap:14px}.dash-table{width:100%;border-collapse:collapse;font-size:13px;overflow:hidden}.dash-table th{color:#c5d3df;text-transform:uppercase;font-size:10px;letter-spacing:.04em;text-align:left;border-bottom:1px solid #244258;padding:9px 8px}.dash-table td{border-bottom:1px solid rgba(255,255,255,.07);padding:9px 8px;color:#eff6fb;white-space:nowrap}.dash-table tr.provisional td{color:#8796a3;background:rgba(128,139,150,.08)}.dash-table tr.started td{color:#6f7b86;background:rgba(80,80,80,.10);text-decoration:line-through}.lineup-pill{border-radius:999px;padding:3px 8px;font-weight:950;font-size:10px;text-transform:uppercase}.lineup-confirmed{background:rgba(49,229,107,.16);color:#31e56b}.lineup-projected{background:rgba(150,160,170,.16);color:#9aa7b3}.lineup-started{background:rgba(255,80,80,.15);color:#ff6a6a}.dash-table.small{font-size:12px}.dash-table.small td{padding:7px 7px}.pos{color:#31e56b;font-weight:950}.neg{color:#ff5757;font-weight:950}.badtxt{color:#ff5757;font-weight:950}.muted{color:#8ea3b4}.tier{border-radius:999px;padding:3px 8px;font-weight:950;font-size:11px}.tier.good{background:rgba(49,229,107,.14);color:#31e56b}.tier.warn{background:rgba(255,201,40,.14);color:#ffc928}.tier.info{background:rgba(46,140,255,.14);color:#2e8cff}.tier.bad{background:rgba(255,69,69,.14);color:#ff5757}.ticketstats{display:grid;grid-template-columns:repeat(5,1fr);border:1px solid #203b50;border-radius:8px;margin-top:12px}.ticketstats div{padding:12px;text-align:center;border-right:1px solid #203b50}.ticketstats div:last-child{border-right:0}.big{font-size:22px;font-weight:950}.detail{display:grid;grid-template-columns:1fr 1fr;gap:10px}.note{color:#aabcc9;font-size:12px}.breakrow{display:flex;justify-content:space-between;margin:7px 0;font-size:12px}.bar{height:8px;background:#163144;border-radius:999px;overflow:hidden}.bar span{display:block;height:100%;background:#36d566}.empty{padding:18px;color:#9db1c1;font-size:13px}.footer{font-size:11px;color:#7f91a1;text-align:center;margin-top:8px}.diag{font-size:11px;color:#8fa2b1;margin-top:8px}.teamhead{font-size:20px;font-weight:950;margin:5px 0}.risk{color:#ffc928;font-size:12px}.statusbox{font-size:30px;font-weight:950}.side-stack{display:grid;gap:14px}
     </style>
     """
     html = f"""
     {css}<div class='cc'>
-      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v14 cleaned buckets</div></div>
+      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v16 lineup status + pregame filter</div></div>
       <div class='grid'>
         <div class='rail'>
           <div class='label'>Today's Slate</div><div style='margin:10px 0 8px;'><span class='datebox'>{target_date.strftime('%a').upper()}<br>{target_date.strftime('%b %-d').upper()}</span><span class='games'>{meta.get('schedule_games',0)}</span></div><div class='note'>games today</div><hr style='border-color:#20384c;margin:14px 0;'>
@@ -1122,7 +1133,7 @@ def main():
     boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Model Win %","Edge %","Score"], ascending=[False, False, False]).head(4)
     traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
     render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
-    st.caption("v14 cleaned buckets: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
+    st.caption("v16 lineup status + pregame filter: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
 
     with st.expander("Advanced views: full slate, ticket builder, diagnostics", expanded=False):
         st.subheader("Full Slate Board")
@@ -1400,6 +1411,7 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
             base_score = 52 + market_points + (edge_pct if pd.notna(edge_pct) else -5) * 2.2 + (4 if is_home else 0)
             total_score = clamp(base_score, 35, 88)
             risk_flags = []
+            if has_started: risk_flags.append("Game started")
             if not pp: risk_flags.append("Pitcher TBD")
             if pd.isna(odds): risk_flags.append("Odds missing")
             if pd.notna(odds) and odds < -220: risk_flags.append("Expensive favorite")
@@ -1430,6 +1442,8 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
                 "Tier": tier,
                 "Risk": ", ".join(risk_flags),
                 "Probable Pitcher": pp.get("fullName", "TBD") if pp else "TBD",
+                "Lineup Status": "Started/Live" if has_started else "Projected lineup",
+                "Pregame Status": pregame_status,
                 "SP Score": 15.0,
                 "Offense Score": 12.0,
                 "Bullpen Proxy": 7.5,
@@ -1631,6 +1645,16 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
         home = ev.get("home_team", "")
         away = ev.get("away_team", "")
         start_iso = ev.get("commence_time", "")
+        has_started = False
+        pregame_status = "Pregame"
+        try:
+            start_dt = pd.to_datetime(start_iso, utc=True)
+            has_started = pd.Timestamp.now(tz="UTC") >= start_dt
+            pregame_status = "Started/Live" if has_started else "Pregame"
+        except Exception:
+            start_dt = None
+            has_started = False
+            pregame_status = "Pregame status unknown"
         if not home or not away:
             continue
         best = _extract_best_prices_for_event(ev)
@@ -1670,6 +1694,7 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
             market_points = market_edge_score(model_pct, implied) if pd.notna(implied) else 0
             score = clamp(55 + market_points + (edge_pct if pd.notna(edge_pct) else -4)*2.8 + (3 if is_home else 0), 35, 90)
             risk_flags = []
+            if has_started: risk_flags.append("Game started")
             if not pp: risk_flags.append("Pitcher TBD")
             if pd.isna(odds): risk_flags.append("Odds missing")
             if pd.notna(odds) and odds < -260: risk_flags.append("Very expensive favorite")
@@ -1702,18 +1727,25 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
                 "Tier": tier,
                 "Risk": ", ".join(risk_flags) if risk_flags else "Clean",
                 "Probable Pitcher": pp.get("fullName", "TBD") if pp else "TBD",
+                "Lineup Status": "Started/Live" if has_started else "Projected lineup",
+                "Pregame Status": pregame_status,
                 "SP Score": 15.0,
                 "Offense Score": 12.5,
                 "Bullpen Proxy": 7.5,
                 "Market Score": round(market_points, 1),
                 "Environment Score": 6.0,
-                "Notes": "v9 strict model. Suggested legs require real edge; Lean/Thin Edge are watchlist only.",
+                "Notes": "v16 pregame model. Started games excluded; projected lineups are gray/provisional.",
                 "Temp": np.nan,
                 "Wind": np.nan,
                 "Precip %": np.nan,
                 "Park Factor": 1.0,
             })
     df = pd.DataFrame(rows)
+    if not df.empty:
+        if "Lineup Status" not in df.columns:
+            df["Lineup Status"] = "Projected lineup"
+        if "Pregame Status" not in df.columns:
+            df["Pregame Status"] = np.where(df.get("Risk", "").astype(str).str.contains("Game started", case=False, na=False), "Started/Live", "Pregame")
     if df.empty:
         # If the odds API is not returning data, show schedule-only diagnostics rather than fake betting legs.
         df, meta = _BUILD_BOARD_SCHEDULE_FIRST(day, api_key, regions, bookmakers)
@@ -1722,8 +1754,9 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
         meta["odds_api_debug_retry"] = st.session_state.get("odds_api_debug_retry", {})
         return df, meta
     df = df.sort_values(["Edge %", "Score"], ascending=[False, False])
+    live_excluded = int(df["Risk"].astype(str).str.contains("Game started", case=False, na=False).sum()) if "Risk" in df.columns else 0
     meta = {
-        "warnings": ["v9 odds-first mode active. This prioritizes usable live odds and suggested legs. Pitcher/team stat enrichment appears when MLB schedule matches the odds event."],
+        "warnings": ["v16 odds-first pregame mode active. Started/live games are excluded from recommendations. Projected/unconfirmed lineups are gray/provisional."] + ([f"{live_excluded} started/live games excluded from pregame recommendations."] if live_excluded else []),
         "errors": st.session_state.get("errors", []),
         "odds_events": len(odds_events),
         "odds_outcomes": outcomes_total,
@@ -1831,7 +1864,7 @@ def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int
         & (core["Score"].fillna(0) >= 72.0)
     ].copy() if not core.empty else core.copy()
 
-    # v14 cleanup:
+    # v16 cleanup:
     # Suggested Winner-First Legs are the official smaller-card candidates.
     # Lean / Thin Edge rows are useful context only and must NOT appear in the main suggested card.
     eligible = suggested.copy()
@@ -2074,7 +2107,7 @@ def render_bet_tracker(df, qualified, full_ticket_qualified, best_available, tar
 def main():
     st.markdown("""
     <div class='hero'>
-      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v14 cleaned buckets</span></div>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v16 lineup status + pregame filter</span></div>
       <div class='hero-sub'>Live odds, winner-first model scoring, three-bucket recommendations, diagnostics, and integrated bet tracking.</div>
     </div>
     """, unsafe_allow_html=True)
@@ -2106,7 +2139,7 @@ def main():
             api_key = os.environ.get("ODDS_API_KEY", "")
         if not api_key:
             api_key = st.text_input("Odds API key", type="password")
-        st.caption("If no odds appear, open the Diagnostics page below. v6 will show odds counts and fallback status without hiding it in an expander.")
+        st.caption("If no odds appear, open the Diagnostics page below. v16 diagnostics show odds counts, live-excluded count, and fallback status.")
     if 'target_date' not in locals():
         target_date=today; regions='us'; bookmakers=''; model_mode='Balanced'; min_edge=2.0; max_fav=-260; max_dog=200; refresh=False
         try:
