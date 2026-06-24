@@ -756,7 +756,7 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     """
     html = f"""
     {css}<div class='cc'>
-      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v13 bet tracker</div></div>
+      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v14 cleaned buckets</div></div>
       <div class='grid'>
         <div class='rail'>
           <div class='label'>Today's Slate</div><div style='margin:10px 0 8px;'><span class='datebox'>{target_date.strftime('%a').upper()}<br>{target_date.strftime('%b %-d').upper()}</span><span class='games'>{meta.get('schedule_games',0)}</span></div><div class='note'>games today</div><hr style='border-color:#20384c;margin:14px 0;'>
@@ -775,13 +775,13 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
             <div class='card'><div class='label'>Tier B+ Legs</div><div class='val yellow'>{tier_bp}</div><div class='note'>Solid plays</div></div>
             <div class='card'><div class='label'>Est. Hit % (3-leg)</div><div class='val'>{hit3:.1f}%</div><div class='note'>Based on top 3</div></div>
           </div>
-          <div class='panel'><div class='title'>Main Recommended Ticket / Smaller Card</div>{html_table(core, ['Team','Opponent','Odds','Book','Model Win %','Implied %','Edge %','Tier','Risk'], 6)}
+          <div class='panel'><div class='title'>Suggested Smaller-Card Legs</div>{html_table(core, ['Team','Opponent','Odds','Book','Model Win %','Implied %','Edge %','Tier','Risk'], 6)}
             <div class='ticketstats'><div><div class='label'>Estimated Odds</div><div class='big pos'>{html_escape(format_odds(parlay_odds) if parlay_odds is not None else '—')}</div></div><div><div class='label'>Est. Hit %</div><div class='big blue'>{(np.prod(core['Model Win %']/100)*100 if not core.empty else 0):.1f}%</div></div><div><div class='label'>Ticket Grade</div><div class='big yellow'>{html_escape(grade)}</div></div><div><div class='label'>Recommendation</div><div class='big yellow'>{html_escape(play_type)}</div></div><div><div class='label'>Read</div><div class='big'>{html_escape(main_msg)}</div></div></div>
           </div>
-          <div class='panel'><div class='title'>All Qualified Legs / Best Available</div>{html_table(best_available, ['Team','Opponent','Odds','Book','Model Win %','Implied %','Edge %','Score','Tier','Risk','Start'], 10, small=True)}</div>
+          <div class='panel'><div class='title'>Best Available / Watchlist Context</div>{html_table(best_available, ['Team','Opponent','Odds','Book','Model Win %','Implied %','Edge %','Score','Tier','Risk','Start'], 10, small=True)}</div>
         </div>
         <div class='side-stack'>
-          <div class='panel'><div class='title'>Optional Booster Legs</div>{html_table(boosters, ['Team','Odds','Model Win %','Edge %','Tier','Risk'], 4, small=True)}<div class='note'>Optional only. Use for higher payout only if you accept more risk.</div></div>
+          <div class='panel'><div class='title'>Optional Lean / Booster Legs</div>{html_table(boosters, ['Team','Odds','Model Win %','Edge %','Tier','Risk'], 4, small=True)}<div class='note'>Optional only. Use for higher payout only if you accept more risk.</div></div>
           <div class='panel'><div class='title redtitle'>Trap Favorites / Do Not Use</div>{html_table(traps, ['Team','Opponent','Odds','Model Win %','Implied %','Risk'], 6, small=True)}</div>
           <div class='panel'><div class='title'>Team / Game Breakdown</div><div class='teamhead'>{html_escape(top_candidate['Team'])}</div><div class='note'>Moneyline: {_odds_html(top_candidate['Odds'])} at {html_escape(top_candidate['Book'])} • Tier {html_escape(top_candidate['Tier'])}</div><div class='detail'><div><div class='label'>Model Win Probability</div><div class='big green'>{fmt_pct(top_candidate['Model Win %'])}</div></div><div><div class='label'>Edge</div><div class='big pos'>{fmt_pct(top_candidate['Edge %'])}</div></div></div>
             <div style='margin-top:12px'>
@@ -1119,10 +1119,10 @@ def main():
 
     # v5 primary render: custom HTML command center first, not native Streamlit tabs.
     taken_tmp = set(best_available.head(5).index) if not best_available.empty else set()
-    boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
+    boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Model Win %","Edge %","Score"], ascending=[False, False, False]).head(4)
     traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
     render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
-    st.caption("v13 bet tracker: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
+    st.caption("v14 cleaned buckets: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
 
     with st.expander("Advanced views: full slate, ticket builder, diagnostics", expanded=False):
         st.subheader("Full Slate Board")
@@ -1146,7 +1146,7 @@ def main():
     with tab1:
         # v5: fully custom HTML command-center render to match the mockup much more closely than native Streamlit cards/tables.
         taken_tmp = set(best_available.head(5).index) if not best_available.empty else set()
-        boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
+        boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Model Win %","Edge %","Score"], ascending=[False, False, False]).head(4)
         traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
         render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
         with st.expander("Open native Streamlit tables / debug view", expanded=False):
@@ -1205,7 +1205,7 @@ def main():
 
                 top_left, top_right = st.columns([2.15, 1], gap="medium")
                 with top_left:
-                    st.markdown("<div class='panel-tight'><div class='section-title'>Main Recommended Ticket / Smaller Card</div>", unsafe_allow_html=True)
+                    st.markdown("<div class='panel-tight'><div class='section-title'>Suggested Smaller-Card Legs</div>", unsafe_allow_html=True)
                     main_cols = ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Tier","Risk","Probable Pitcher"]
                     if len(full_ticket_qualified) >= 5:
                         main_ticket = full_ticket_qualified.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).head(5)
@@ -1227,9 +1227,9 @@ def main():
                     st.markdown("</div>", unsafe_allow_html=True)
 
                 with top_right:
-                    st.markdown("<div class='panel-tight'><div class='section-title'>Optional Booster Legs</div>", unsafe_allow_html=True)
+                    st.markdown("<div class='panel-tight'><div class='section-title'>Optional Lean / Booster Legs</div>", unsafe_allow_html=True)
                     taken = set(best_available.head(5).index)
-                    boosters = df[(~df.index.isin(taken)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
+                    boosters = df[(~df.index.isin(taken)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Model Win %","Edge %","Score"], ascending=[False, False, False]).head(4)
                     if boosters.empty:
                         st.caption("No booster leg recommended.")
                     else:
@@ -1831,9 +1831,14 @@ def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int
         & (core["Score"].fillna(0) >= 72.0)
     ].copy() if not core.empty else core.copy()
 
-    # Use suggested legs for smaller-card display, but reserve the stronger core set for full-ticket quality.
+    # v14 cleanup:
+    # Suggested Winner-First Legs are the official smaller-card candidates.
+    # Lean / Thin Edge rows are useful context only and must NOT appear in the main suggested card.
     eligible = suggested.copy()
-    qualified = suggested.copy()
+    qualified = suggested[
+        (suggested["Tier"].isin(["A", "B+", "B"]))
+        & (suggested["Edge %"].fillna(-99) >= 2.0)
+    ].copy()
 
     # Watchlist: winner-leaning but thin edge, plus high-edge dogs that are not parlay-safe.
     winner_watch = base[
@@ -2069,7 +2074,7 @@ def render_bet_tracker(df, qualified, full_ticket_qualified, best_available, tar
 def main():
     st.markdown("""
     <div class='hero'>
-      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v13 bet tracker</span></div>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v14 cleaned buckets</span></div>
       <div class='hero-sub'>Live odds, winner-first model scoring, three-bucket recommendations, diagnostics, and integrated bet tracking.</div>
     </div>
     """, unsafe_allow_html=True)
@@ -2138,7 +2143,7 @@ def main():
 
     taken_tmp = set(best_available.head(5).index) if not best_available.empty else set()
     price_ok = (df["Odds"].notna()) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)
-    boosters_tmp = df[price_ok & (~df.index.isin(taken_tmp))].sort_values(["Edge %","Score"], ascending=[False, False]).head(4)
+    boosters_tmp = df[price_ok & (~df.index.isin(taken_tmp))].sort_values(["Model Win %","Edge %","Score"], ascending=[False, False, False]).head(4)
     traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"].fillna(-99) < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
 
     diag_line = f"Build mode: {meta.get('build_mode','?')} | Odds events: {meta.get('odds_events',0)} | Outcomes: {meta.get('odds_outcomes',0)} | Matched games: {meta.get('matched_games',0)}"

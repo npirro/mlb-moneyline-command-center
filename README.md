@@ -20,3 +20,11 @@ ODDS_API_KEY = "your_the_odds_api_key_here"
 
 ## Usage
 Open the app, refresh odds/model, then go to **Bet Tracker** and save whichever legs you are testing. After games finish, update Result and Miss Reason.
+
+
+## v14 cleaned buckets
+
+- Main Suggested Legs now only show Tier B or better with 2%+ edge.
+- Lean and Thin Edge rows are separated into optional add-ons/watchlist context, not the main card.
+- Optional booster rows are sorted winner-first and should not duplicate main suggested legs.
+- The top card label is cleaned up so Suggested Legs means smaller-card candidates, not every possible lean.
