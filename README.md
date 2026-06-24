@@ -1,21 +1,20 @@
-# MLB Moneyline Command Center — v17 No-Play Display Cleanup
+# MLB Moneyline Command Center — v18 Label Cleanup
 
-This is the clean v17 package. It should show the visible marker:
+This is the clean v18 package. It should show the visible marker:
 
-**v17 no-play display cleanup**
+**v18 label cleanup**
 
-## What v17 fixes
+## What v18 fixes
 
-- If there are 0 official suggested legs, the main card now says **No Suggested Legs — Watchlist Only**.
-- Thin Edge / No Bet rows are shown only as watchlist context, not as official recommendations.
-- Estimated hit percentage and ticket odds are based on official legs, not best-available context rows.
-- Pregame model still excludes started/live games from recommendations.
-- Projected/unconfirmed lineups remain gray/provisional.
-- Bet tracker remains included.
+- Renames **Trap Favorites / Do Not Use** to **Overpriced / No-Edge Favorites**.
+- Keeps the model logic unchanged from v17.
+- Keeps no-play/watchlist display cleanup from v17.
+- Keeps pregame-only filtering and gray/provisional lineup warnings.
+- Keeps the bet tracker included.
 
 ## Deploy
 
-Upload the files in this ZIP directly to the same GitHub folder Streamlit deploys from. Replace the current files, commit changes, then reboot Streamlit.
+Upload these files directly to the same GitHub folder Streamlit deploys from. Replace the current files, commit changes, then reboot Streamlit.
 
 Main file path: `app.py`
 
