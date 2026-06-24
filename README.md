@@ -1,16 +1,16 @@
-# MLB Moneyline Command Center — v16 Lineup Status + Pregame Filter
+# MLB Moneyline Command Center — v17 No-Play Display Cleanup
 
-This is the clean v16 package. It should show the visible marker:
+This is the clean v17 package. It should show the visible marker:
 
-**v16 lineup status + pregame filter**
+**v17 no-play display cleanup**
 
-## What v16 adds
+## What v17 fixes
 
-- Pregame model excludes started/live games from recommendations.
-- Started/live games are marked as excluded so live odds do not contaminate pregame cards.
-- Projected/unconfirmed lineups are shown as gray/provisional.
-- Lineup status is displayed in recommendation tables.
-- Official recommendation logic remains winner-first with one side per game.
+- If there are 0 official suggested legs, the main card now says **No Suggested Legs — Watchlist Only**.
+- Thin Edge / No Bet rows are shown only as watchlist context, not as official recommendations.
+- Estimated hit percentage and ticket odds are based on official legs, not best-available context rows.
+- Pregame model still excludes started/live games from recommendations.
+- Projected/unconfirmed lineups remain gray/provisional.
 - Bet tracker remains included.
 
 ## Deploy

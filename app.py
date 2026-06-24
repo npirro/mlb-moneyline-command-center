@@ -734,18 +734,22 @@ def html_table(df: pd.DataFrame, cols: List[str], limit: int = 8, small: bool = 
     return "".join(rows)
 
 def render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters, traps, target_date, qlegs, tier_a, tier_bp, play_type, status, grade, max_height=1120):
-    # Decide core ticket rows.
+    # Decide official display rows. v17 intentionally separates official suggestions from watchlist context.
+    no_official_legs = len(qualified) == 0
     if len(full_ticket_qualified) >= 5:
         core = full_ticket_qualified.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).head(5)
         main_msg = "Main 5-leg ticket supported"
+        main_title = "Core Parlay Legs / Main Ticket"
     elif len(qualified) >= 1:
         core = qualified.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).head(min(len(qualified), 4))
         main_msg = f"Smaller {len(core)}-leg card / singles only"
+        main_title = "Suggested Smaller-Card Legs"
     else:
-        core = best_available.head(5)
-        main_msg = "No core legs — showing best available"
+        core = pd.DataFrame(columns=df.columns)
+        main_msg = "No official play — watchlist context only"
+        main_title = "No Suggested Legs — Watchlist Only"
 
-    hit3 = np.prod((best_available.head(3)["Model Win %"] / 100)) * 100 if len(best_available) >= 3 else 0
+    hit3 = np.prod((qualified.head(3)["Model Win %"] / 100)) * 100 if len(qualified) >= 3 else 0
     parlay_odds = parlay_american(core["Odds"].dropna().tolist()) if not core.empty else None
     warnings = meta.get("warnings", [])[:4]
     errors = meta.get("errors", [])[:3]
@@ -767,7 +771,7 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
     """
     html = f"""
     {css}<div class='cc'>
-      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v16 lineup status + pregame filter</div></div>
+      <div class='top'><div class='logo'>⚾ MLB MONEYLINE PARLAY COMMAND CENTER</div><div class='nav'><span>Command Center Snapshot</span></div><div class='update'>Last Updated: {datetime.now(EASTERN).strftime('%-I:%M %p ET')}<br>{target_date.strftime('%b %-d, %Y')}</div><div class='btn'>v17 no-play display cleanup</div></div>
       <div class='grid'>
         <div class='rail'>
           <div class='label'>Today's Slate</div><div style='margin:10px 0 8px;'><span class='datebox'>{target_date.strftime('%a').upper()}<br>{target_date.strftime('%b %-d').upper()}</span><span class='games'>{meta.get('schedule_games',0)}</span></div><div class='note'>games today</div><hr style='border-color:#20384c;margin:14px 0;'>
@@ -784,12 +788,13 @@ def render_custom_command_center(df, meta, qualified, full_ticket_qualified, bes
             <div class='card'><div class='label'>Suggested Legs</div><div class='val green'>{qlegs}</div><div class='note'>Core/smaller card</div></div>
             <div class='card'><div class='label'>Tier A Legs</div><div class='val green'>{tier_a}</div><div class='note'>Best plays</div></div>
             <div class='card'><div class='label'>Tier B+ Legs</div><div class='val yellow'>{tier_bp}</div><div class='note'>Solid plays</div></div>
-            <div class='card'><div class='label'>Est. Hit % (3-leg)</div><div class='val'>{hit3:.1f}%</div><div class='note'>Based on top 3</div></div>
+            <div class='card'><div class='label'>Est. Hit % (Official)</div><div class='val'>{(f'{hit3:.1f}%' if hit3 else '—')}</div><div class='note'>Based on official legs</div></div>
           </div>
-          <div class='panel'><div class='title'>Suggested Smaller-Card Legs</div>{html_table(core, ['Team','Opponent','Odds','Book','Model Win %','Implied %','Edge %','Tier','Risk'], 6)}
-            <div class='ticketstats'><div><div class='label'>Estimated Odds</div><div class='big pos'>{html_escape(format_odds(parlay_odds) if parlay_odds is not None else '—')}</div></div><div><div class='label'>Est. Hit %</div><div class='big blue'>{(np.prod(core['Model Win %']/100)*100 if not core.empty else 0):.1f}%</div></div><div><div class='label'>Ticket Grade</div><div class='big yellow'>{html_escape(grade)}</div></div><div><div class='label'>Recommendation</div><div class='big yellow'>{html_escape(play_type)}</div></div><div><div class='label'>Read</div><div class='big'>{html_escape(main_msg)}</div></div></div>
+          <div class='panel'><div class='title'>{html_escape(main_title)}</div>
+            {html_table(core, ['Team','Opponent','Odds','Book','Model Win %','Implied %','Edge %','Tier','Risk'], 6) if not core.empty else "<div class='empty'><b>No official suggested legs right now.</b><br>These rows are intentionally blank because the model has not found any qualified pregame plays under the current filters.</div>"}
+            <div class='ticketstats'><div><div class='label'>Estimated Odds</div><div class='big pos'>{html_escape(format_odds(parlay_odds) if parlay_odds is not None else '—')}</div></div><div><div class='label'>Est. Hit %</div><div class='big blue'>{((np.prod(core['Model Win %']/100)*100) if not core.empty else 0):.1f}%</div></div><div><div class='label'>Ticket Grade</div><div class='big yellow'>{html_escape(grade)}</div></div><div><div class='label'>Recommendation</div><div class='big yellow'>{html_escape(play_type)}</div></div><div><div class='label'>Read</div><div class='big'>{html_escape(main_msg)}</div></div></div>
           </div>
-          <div class='panel'><div class='title'>Best Available / Watchlist Context</div>{html_table(best_available, ['Team','Opponent','Odds','Book','Model Win %','Implied %','Edge %','Score','Tier','Risk','Start'], 10, small=True)}</div>
+          <div class='panel'><div class='title'>Best Available / Watchlist Context</div><div class='note' style='margin-bottom:8px'>Context only. Thin Edge / No Bet rows are not official recommendations.</div>{html_table(best_available, ['Team','Opponent','Odds','Book','Model Win %','Implied %','Edge %','Score','Tier','Risk','Start'], 10, small=True)}</div>
         </div>
         <div class='side-stack'>
           <div class='panel'><div class='title'>Optional Lean / Booster Legs</div>{html_table(boosters, ['Team','Odds','Model Win %','Edge %','Tier','Risk'], 4, small=True)}<div class='note'>Optional only. Use for higher payout only if you accept more risk.</div></div>
@@ -1133,7 +1138,7 @@ def main():
     boosters_tmp = df[(~df.index.isin(taken_tmp)) & (df["Odds"] >= max_fav) & (df["Odds"] <= max_dog)].sort_values(["Model Win %","Edge %","Score"], ascending=[False, False, False]).head(4)
     traps_tmp = df[((df["Odds"] < -120) & (df["Edge %"] < 0.5)) | (df["Risk"].str.contains("Expensive", na=False))].sort_values(["Odds","Edge %"]).head(6)
     render_custom_command_center(df, meta, qualified, full_ticket_qualified, best_available, boosters_tmp, traps_tmp, target_date, qlegs, tier_a, tier_bp, play_type, status, grade)
-    st.caption("v16 lineup status + pregame filter: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
+    st.caption("v17 no-play display cleanup: Official suggested legs require at least 2% edge and Tier B or better. Lean/Thin Edge teams are watchlist only, not official recommended plays.")
 
     with st.expander("Advanced views: full slate, ticket builder, diagnostics", expanded=False):
         st.subheader("Full Slate Board")
@@ -1216,7 +1221,7 @@ def main():
 
                 top_left, top_right = st.columns([2.15, 1], gap="medium")
                 with top_left:
-                    st.markdown("<div class='panel-tight'><div class='section-title'>Suggested Smaller-Card Legs</div>", unsafe_allow_html=True)
+                    st.markdown("<div class='panel-tight'><div class='section-title'>Suggested Smaller-Card Legs</div>" if qlegs > 0 else "<div class='panel-tight'><div class='section-title'>No Suggested Legs — Watchlist Only</div>", unsafe_allow_html=True)
                     main_cols = ["Team","Opponent","Odds","Book","Model Win %","Implied %","Edge %","Tier","Risk","Probable Pitcher"]
                     if len(full_ticket_qualified) >= 5:
                         main_ticket = full_ticket_qualified.sort_values(["Tier", "Edge %", "Score"], ascending=[True, False, False]).head(5)
@@ -1232,8 +1237,8 @@ def main():
                         st.dataframe(_display_cols(qualified, main_cols), use_container_width=True, hide_index=True, height=160)
                         st.warning("Use singles or a tiny 2-leg only. No main parlay.")
                     else:
-                        st.error("No core model legs under the current filters. Showing best available / near-miss candidates instead.")
-                        st.markdown("**Best available smaller-play / near-miss candidates:**")
+                        st.error("No official suggested legs under the current filters. Best available rows below are watchlist context only, not system plays.")
+                        st.markdown("**Best available / watchlist context only:**")
                         st.dataframe(_display_cols(best_available, main_cols), use_container_width=True, hide_index=True, height=260)
                     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1734,7 +1739,7 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
                 "Bullpen Proxy": 7.5,
                 "Market Score": round(market_points, 1),
                 "Environment Score": 6.0,
-                "Notes": "v16 pregame model. Started games excluded; projected lineups are gray/provisional.",
+                "Notes": "v17 pregame model. Started games excluded; projected lineups are gray/provisional; no official play unless legs qualify.",
                 "Temp": np.nan,
                 "Wind": np.nan,
                 "Precip %": np.nan,
@@ -1756,7 +1761,7 @@ def build_board(day: date, api_key: str, regions: str, bookmakers: str) -> Tuple
     df = df.sort_values(["Edge %", "Score"], ascending=[False, False])
     live_excluded = int(df["Risk"].astype(str).str.contains("Game started", case=False, na=False).sum()) if "Risk" in df.columns else 0
     meta = {
-        "warnings": ["v16 odds-first pregame mode active. Started/live games are excluded from recommendations. Projected/unconfirmed lineups are gray/provisional."] + ([f"{live_excluded} started/live games excluded from pregame recommendations."] if live_excluded else []),
+        "warnings": ["v17 no-play display cleanup active. Started/live games are excluded; projected/unconfirmed lineups are gray/provisional; no-play slates show watchlist only."] + ([f"{live_excluded} started/live games excluded from pregame recommendations."] if live_excluded else []),
         "errors": st.session_state.get("errors", []),
         "odds_events": len(odds_events),
         "odds_outcomes": outcomes_total,
@@ -1864,7 +1869,7 @@ def _qualification(df: pd.DataFrame, min_edge: float, max_fav: int, max_dog: int
         & (core["Score"].fillna(0) >= 72.0)
     ].copy() if not core.empty else core.copy()
 
-    # v16 cleanup:
+    # v17 cleanup:
     # Suggested Winner-First Legs are the official smaller-card candidates.
     # Lean / Thin Edge rows are useful context only and must NOT appear in the main suggested card.
     eligible = suggested.copy()
@@ -2107,7 +2112,7 @@ def render_bet_tracker(df, qualified, full_ticket_qualified, best_available, tar
 def main():
     st.markdown("""
     <div class='hero'>
-      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v16 lineup status + pregame filter</span></div>
+      <div class='hero-title'>⚾ MLB Moneyline Parlay Command Center <span style='font-size:.9rem;color:#31e56b;'>v17 no-play display cleanup</span></div>
       <div class='hero-sub'>Live odds, winner-first model scoring, three-bucket recommendations, diagnostics, and integrated bet tracking.</div>
     </div>
     """, unsafe_allow_html=True)
@@ -2139,7 +2144,7 @@ def main():
             api_key = os.environ.get("ODDS_API_KEY", "")
         if not api_key:
             api_key = st.text_input("Odds API key", type="password")
-        st.caption("If no odds appear, open the Diagnostics page below. v16 diagnostics show odds counts, live-excluded count, and fallback status.")
+        st.caption("If no odds appear, open the Diagnostics page below. v17 diagnostics show odds counts, live-excluded count, and fallback status.")
     if 'target_date' not in locals():
         target_date=today; regions='us'; bookmakers=''; model_mode='Balanced'; min_edge=2.0; max_fav=-260; max_dog=200; refresh=False
         try:
